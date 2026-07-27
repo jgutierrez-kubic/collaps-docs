@@ -4,24 +4,28 @@
 
 ## Arquitectura
 
-* [Visión general](arquitectura/README.md)
-* [Componentes y límites](arquitectura/componentes.md)
-* [Flujo end-to-end](arquitectura/flujo.md)
+* [Visión general](arquitectura/vision-general.md)
+* [Componentes y límites](arquitectura/componentes-y-limites.md)
+* [Flujo end-to-end](arquitectura/flujo-end-to-end.md)
 
 ## Orquestador
 
-* [FastAPI / AnalysisEngine](orquestador/README.md)
-* [Payload y contratos](orquestador/payload.md)
-* [Integración n8n](orquestador/n8n.md)
+* [FastAPI / AnalysisEngine](orquestador/fastapi-analysisengine.md)
+* [Payload y contratos](orquestador/payload-y-contratos.md)
+* [Integración n8n](orquestador/integracion-n8n.md)
 
 ## Motor matemático
 
-* [collaps_engine](motor-matematico/README.md)
-* [OPERATIONS_REGISTRY](motor-matematico/operaciones.md)
-* [API pública](motor-matematico/api.md)
+* [Conceptos base](motor-matematico/conceptos-base.md)
+* [Numéricas](motor-matematico/numericas.md)
+* [Texto](motor-matematico/texto.md)
+* [Fechas](motor-matematico/fechas.md)
+* [Listas](motor-matematico/listas.md)
+* [Lógica](motor-matematico/logica.md)
+* [Legacy](motor-matematico/legacy.md)
 
 ## Despliegue
 
-* [Cloud Run](despliegue/README.md)
-* [Docker / Cloud Build](despliegue/docker.md)
-* [Variables de entorno](despliegue/entorno.md)
+* [Variables de entorno](despliegue/variables-entorno.md)
+* [Cloud Run](despliegue/cloud-run.md)
+* [Docker / Cloud Build](despliegue/docker-cloud-build.md)
