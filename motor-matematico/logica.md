@@ -1,48 +1,42 @@
 # Métodos lógicos
 
-Dos operaciones de estructura y lógica booleana.
+Dos operaciones para revisar nulos y combinar banderas verdadero/falso.
 
 ---
 
 ## Resumen
 
-| method_id | Semántica | `result_value` | `is_match` | Options |
+| method_id | En una frase | `result_value` | `is_match` | Options |
 |---|---|---|---|---|
-| `null_check` | Diagnóstico de nulos | `dict` de flags | `not any_null` | — |
-| `boolean_logic` | AND / OR / XOR | `bool` | = resultado | `operator` |
-
-Ambos están en `_BOOLEAN_PURE_METHODS` del orquestador: no se materializa columna `is_match__` adicional (para `null_check` el indicador queda en el dict / en `is_match` del resultado de `execute_transformation`).
+| `null_check` | ¿Hay valores vacíos (null)? | `dict` de flags | `true` si ninguno es null | — |
+| `boolean_logic` | Combina dos sí/no con Y / O / XOR | `bool` | = resultado | `operator` |
 
 ---
 
 ## `null_check`
 
-Inspecciona nulidad de ambos operandos (`is None` estricto; no trata `""` ni `NaN` como null).
+### Explicación en lenguaje humano
+
+Antes de restar o comparar, a veces solo quieres saber si **falta un dato**. Este método no calcula una diferencia: diagnostica si A, B, ambos o alguno están en `null`.
+
+Importante: solo mira `null` estricto. Un texto vacío `""` o un cero `0` **no** se consideran null.
+
+**Ejemplo real:** cantidad en modelo = `null`, cantidad en contrato = `5` → hay un valor faltante en A (`any_null: true`). El sistema marca `is_match: false` porque “no están ambos presentes”.
 
 ### Retorno (`result_value`)
 
-| Campo | Tipo | Significado |
-|---|---|---|
-| `a_is_null` | `bool` | `val_a is None` |
-| `b_is_null` | `bool` | `val_b is None` |
-| `both_null` | `bool` | Ambos null |
-| `any_null` | `bool` | Al menos uno null |
+| Campo | Significado humano |
+|---|---|
+| `a_is_null` | ¿Falta el valor A? |
+| `b_is_null` | ¿Falta el valor B? |
+| `both_null` | ¿Faltan los dos? |
+| `any_null` | ¿Falta al menos uno? |
 
-### `is_match`
-
-```text
-is_match = not result_value["any_null"]
-```
-
-Es decir: **match** solo si ninguno es null.
+`is_match = true` solo cuando **ninguno** es null.
 
 ```python
 execute_transformation(None, 5, "null_check")
-# → result_value: {
-#      a_is_null: true, b_is_null: false,
-#      both_null: false, any_null: true
-#    }
-# → is_match: false
+# → any_null: true, is_match: false
 
 execute_transformation("x", "y", "null_check")
 # → any_null: false, is_match: true
@@ -52,40 +46,37 @@ execute_transformation("x", "y", "null_check")
 
 ## `boolean_logic`
 
-Combina A y B como booleanos con el operador elegido.
+### Explicación en lenguaje humano
 
-### Coerción `_to_bool`
+Toma dos valores “sí/no” (o cosas que se pueden interpretar como tales) y los combina:
 
-| Entrada | Resultado |
+| Operador | Pregunta en lenguaje humano |
 |---|---|
-| `bool` | Tal cual |
-| `int` / `float` | `!= 0` |
-| `str` | `true` si (lower/strip) ∈ `{1, true, t, yes, y, si, sí}` |
-| Otro | `bool(value)` |
+| `AND` | ¿Se cumplen **las dos** condiciones? |
+| `OR` | ¿Se cumple **al menos una**? |
+| `XOR` | ¿Se cumple **exactamente una** (no ambas)? |
+
+**Ejemplos reales**
+
+- `AND`: “¿está aprobado en modelo **y** en contrato?”  
+- `OR`: “¿tiene alerta en A **o** en B?”  
+- `XOR`: “¿solo uno de los dos lados está marcado?” (inconsistencia)
+
+Números: `0` = falso, distinto de cero = verdadero. Textos como `true`, `yes`, `si`, `1` también cuentan como verdadero.
 
 ### Options
 
 | Clave | Default | Valores |
 |---|---|---|
-| `operator` | `"AND"` | `"AND"`, `"OR"`, `"XOR"` (case-insensitive; otro valor cae en AND) |
-
-### Retorno
-
-| Operador | Expresión |
-|---|---|
-| `AND` | `a and b` |
-| `OR` | `a or b` |
-| `XOR` | `a ^ b` |
-
-`is_match` = el booleano resultante.
+| `operator` | `"AND"` | `"AND"`, `"OR"`, `"XOR"` |
 
 ```python
 execute_transformation(True, False, "boolean_logic", {"operator": "OR"})
-# → result_value: true, is_match: true
+# → true
 
 execute_transformation(1, 0, "boolean_logic", {"operator": "AND"})
-# → result_value: false
+# → false
 
 execute_transformation(True, False, "boolean_logic", {"operator": "XOR"})
-# → result_value: true
+# → true
 ```

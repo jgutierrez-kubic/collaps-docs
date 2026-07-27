@@ -24,6 +24,10 @@
 * [Lógica](motor-matematico/logica.md)
 * [Legacy](motor-matematico/legacy.md)
 
+## Guías Prácticas y Ejemplos
+
+* [Directus end-to-end](guias-practicas/directus-end-to-end.md)
+
 ## Despliegue
 
 * [Variables de entorno](despliegue/variables-entorno.md)

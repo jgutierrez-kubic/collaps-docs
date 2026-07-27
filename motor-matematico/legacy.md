@@ -1,96 +1,83 @@
 # Alias legacy — `DIFERENCIA` e `IGUALDAD`
 
-Compatibilidad con workflows n8n / payloads antiguos. **No** son claves de `OPERATIONS_REGISTRY`; el orquestador los traduce antes de llamar a `execute_transformation`.
+Nombres antiguos que todavía aceptan Directus/n8n por compatibilidad. Por detrás se traducen a métodos canónicos del motor.
+
+---
+
+## Explicación en lenguaje humano
+
+Durante mucho tiempo los workflows hablaban de “hacer una DIFERENCIA” o “verificar IGUALDAD”. El motor moderno usa IDs técnicos (`math_sub`, `strict_equal`), pero **sigue entendiendo** esos dos nombres clásicos para no romper configuraciones viejas.
+
+No necesitas programar: si en **Métodos Calculo** escribes `DIFERENCIA` o `IGUALDAD`, el sistema sabe qué hacer. Para análisis nuevos, preferimos los `method_id` modernos (son más claros y hay más opciones).
+
+---
 
 ## Dónde se aceptan
 
 | Capa | Comportamiento |
 |---|---|
-| `AnalysisPayload.validate_methods` | Permite los literales `DIFERENCIA` e `IGUALDAD` (además de los 21 `method_id`) |
-| `AnalysisEngine._resolve_method` | Mapea al método canónico (+ flag de swap de operandos) |
-| `CollapsMethodConfigurator` (n8n) | Expone ambos alias en el selector de métodos |
-| `OPERATIONS_REGISTRY` | **No** contiene estas claves |
+| Validación del payload | Permite `DIFERENCIA` e `IGUALDAD` además de los 21 métodos |
+| Orquestador | Los traduce al método real (y, en DIFERENCIA, invierte el orden) |
+| Selector n8n | Siguen apareciendo en la lista |
+| `OPERATIONS_REGISTRY` | **No** los incluye como claves propias |
 
 ---
 
 ## Tabla de resolución
 
-Definida en `app/core/analysis_engine.py`:
-
 ```python
 _LEGACY_METHOD_MAP = {
-    "DIFERENCIA": ("math_sub", True),   # swap_operands=True
+    "DIFERENCIA": ("math_sub", True),   # invierte A y B
     "IGUALDAD":   ("strict_equal", False),
 }
 ```
 
-| Alias (CSV en `metodos_calculo`) | method_id efectivo | Swap operandos | Semántica resultante |
+| Alias | Se convierte en | ¿Invierte A y B? | Resultado práctico |
 |---|---|---|---|
-| `DIFERENCIA` | `math_sub` | **Sí** | `val_b - val_a` (B − A) |
-| `IGUALDAD` | `strict_equal` | No | `val_a == val_b` |
-
-La comparación del alias es case-insensitive vía `.strip().upper()` en el resolver.
+| `DIFERENCIA` | `math_sub` | **Sí** | Calcula **B − A** |
+| `IGUALDAD` | `strict_equal` | No | ¿A es exactamente igual a B? |
 
 ---
 
 ## `DIFERENCIA`
 
-### Por qué existe el swap
+### Explicación en lenguaje humano
 
-Históricamente COLLAPS reportaba la diferencia como **B − A** (referencia menos modelo, o contrato menos cantidad, según el dominio). El método canónico `math_sub` calcula **A − B**. El flag `swap_operands=True` invierte los valores **antes** de llamar al engine:
+Históricamente COLLAPS reportaba la diferencia como **referencia menos modelo** (B menos A): “¿cuánto tiene el contrato respecto al modelo?”. El método moderno `math_sub` hace **A menos B**. Por eso, al usar el alias, el sistema **cambia el orden** internamente para conservar el signo de siempre.
 
-```python
-if swap_operands:
-    val_a, val_b = val_b, val_a
-execute_transformation(val_a, val_b, "math_sub")
-```
+**Ejemplo real**
 
-### Ejemplo
+| Cantidad modelo (A) | Cantidad contrato (B) | Con `DIFERENCIA` | Con `math_sub` |
+|---|---|---|---|
+| 10 | 3 | $$3 - 10 = -7$$ | $$10 - 3 = 7$$ |
 
-| `val_a` (col A) | `val_b` (col B) | Alias | Cálculo efectivo | `result_value` |
-|---|---|---|---|---|
-| `10` | `3` | `DIFERENCIA` | `3 - 10` | `-7.0` |
-| `10` | `3` | `math_sub` | `10 - 3` | `7.0` |
+Si migras un análisis de `DIFERENCIA` a `math_sub` sin cambiar el orden de columnas, **el signo se invierte**.
 
-### Retorno / match
-
-Igual que [`math_sub`](numericas.md#math_sub): `float` \| `null`, `is_match: null`.  
-Nombre de columna de resultado usa el **method_id canónico** (`math_sub`), no el alias.
+La columna de resultado en la tabla final se nombra con el método canónico (`...__math_sub`), no con la palabra `DIFERENCIA`.
 
 ---
 
 ## `IGUALDAD`
 
-Traducción directa a [`strict_equal`](texto.md#strict_equal) sin invertir operandos.
+### Explicación en lenguaje humano
 
-| `val_a` | `val_b` | `result_value` | `is_match` |
-|---|---|---|---|
-| `"abc"` | `"abc"` | `true` | `true` |
-| `1` | `"1"` | `false` | `false` |
+Es simplemente “¿son iguales tal cual?”, igual que `strict_equal`. No limpia acentos ni mayúsculas.
 
-No aplica normalización de texto (para eso usar `normalized_equal`).
+**Ejemplo real:** código `ABC` vs `ABC` → sí. `Café` vs `Cafe` → no (para eso usa `normalized_equal`).
 
 ---
 
-## Uso en el payload
+## Uso en el payload / Directus
 
-```json
-{
-  "columnas_a": "cantidad,nombre",
-  "columnas_b": "cantidad,nombre",
-  "metodos_calculo": "DIFERENCIA,IGUALDAD"
-}
+```text
+Metodos Calculo: DIFERENCIA,IGUALDAD
 ```
 
-Equivalente canónico (misma semántica de DIFERENCIA requiere conciencia del orden):
+Equivalente moderno (ojo al signo de la resta):
 
-```json
-{
-  "metodos_calculo": "math_sub,strict_equal"
-}
+```text
+Metodos Calculo: math_sub,strict_equal
 ```
-
-> Si migras de `DIFERENCIA` a `math_sub` **sin** ajustar el orden de columnas, el signo del resultado se invierte.
 
 ---
 
@@ -98,6 +85,6 @@ Equivalente canónico (misma semántica de DIFERENCIA requiere conciencia del or
 
 | Escenario | Preferir |
 |---|---|
-| Workflows nuevos | `method_id` canónicos (`math_sub`, `strict_equal`, …) |
-| Workflows legacy ya en producción | Mantener alias hasta migrar con prueba de regresión de signo |
-| Documentación / tests | Nombrar siempre el método canónico y anotar el swap si aplica |
+| Análisis nuevos | `method_id` canónicos (`math_sub`, `strict_equal`, …) |
+| Flujos legacy en producción | Mantener alias hasta validar el signo del resultado |
+| Documentar para el equipo | Nombrar el método canónico y avisar si hay inversión B−A |

@@ -47,6 +47,10 @@ Ver [`SUMMARY.md`](./SUMMARY.md).
 - [Lógica](motor-matematico/logica.md)
 - [Legacy](motor-matematico/legacy.md)
 
+### Guías prácticas y ejemplos
+
+- [Directus end-to-end](guias-practicas/directus-end-to-end.md)
+
 ### Despliegue
 
 - [Variables de entorno](despliegue/variables-entorno.md)

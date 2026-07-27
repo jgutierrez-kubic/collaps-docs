@@ -1,31 +1,39 @@
 # Métodos numéricos
 
-Seis operaciones aritméticas y de tolerancia del `OPERATIONS_REGISTRY`. Todas convierten operandos con `_to_float`; si alguno no es convertible, el resultado suele ser `null` (excepto `math_tolerance`, que devuelve un dict con flags en `false`/`null`).
+Seis operaciones para cantidades, precios, metros, porcentajes y márgenes de tolerancia. Si un valor no se puede leer como número, el resultado suele ser vacío (`null`), salvo en `math_tolerance`, que devuelve un detalle con flags.
 
 ---
 
 ## Resumen
 
-| method_id | Fórmula / semántica | `result_value` | `is_match` | Options |
+| method_id | En una frase | `result_value` | `is_match` | Options |
 |---|---|---|---|---|
-| `math_add` | `a + b` | `float` \| `null` | `null` | — |
-| `math_sub` | `a - b` | `float` \| `null` | `null` | — |
-| `math_diff_abs` | `\|a - b\|` | `float` \| `null` | `null` | — |
-| `math_diff_pct` | `((a - b) / a) * 100` | `float` \| `inf` \| `null` | `null` | — |
-| `math_tolerance` | ¿dentro de margen? | `dict` | `is_within_tolerance` | `epsilon`, `tolerance_pct` |
-| `math_ratio` | `a / b` | `float` \| `null` | `null` | — |
+| `math_add` | Suma A + B | `float` \| `null` | `null` | — |
+| `math_sub` | Resta A − B | `float` \| `null` | `null` | — |
+| `math_diff_abs` | Distancia numérica (siempre positiva) | `float` \| `null` | `null` | — |
+| `math_diff_pct` | Diferencia en % respecto de A | `float` \| `inf` \| `null` | `null` | — |
+| `math_tolerance` | ¿Están lo bastante cerca? | `dict` | sí/no | `epsilon`, `tolerance_pct` |
+| `math_ratio` | Cociente A ÷ B | `float` \| `null` | `null` | — |
 
 ---
 
 ## `math_add`
 
-Suma aritmética.
+### Explicación en lenguaje humano
+
+Suma dos números. Útil cuando quieres un total: metros de modelo + metros de ajuste, o dos partidas que deben consolidarse.
+
+**Ejemplo real:** cantidad modelo `120` + cantidad adicional `15` → `135`.
 
 | | |
 |---|---|
-| **Entrada** | `val_a`, `val_b` numéricos (o coercibles) |
+| **Entrada** | `val_a`, `val_b` numéricos |
 | **Options** | ninguna |
-| **Retorno** | `a + b` o `null` si falla la coerción |
+| **Retorno** | `a + b` o `null` |
+
+$$
+a + b
+$$
 
 ```python
 execute_transformation(10, 5, "math_add")
@@ -36,7 +44,13 @@ execute_transformation(10, 5, "math_add")
 
 ## `math_sub`
 
-Resta aritmética: **A − B**.
+### Explicación en lenguaje humano
+
+Resta **A menos B**. Es el método típico para ver cuánto “sobra” o “falta” del lado A respecto al B.
+
+**Ejemplo real:** cantidad en modelo `100` y cantidad en contrato `95` → diferencia `5` (el modelo tiene 5 unidades más).
+
+> El alias legacy `DIFERENCIA` hace lo contrario en el orden (B − A). Ver [Legacy](legacy.md).
 
 | | |
 |---|---|
@@ -44,24 +58,28 @@ Resta aritmética: **A − B**.
 | **Options** | ninguna |
 | **Retorno** | `a - b` o `null` |
 
+$$
+a - b
+$$
+
 ```python
 execute_transformation(10, 3, "math_sub")
 # → result_value: 7.0
 ```
 
-> El alias legacy `DIFERENCIA` invierte operandos antes de llamar a `math_sub` (calcula B − A). Ver [Legacy](legacy.md).
-
 ---
 
 ## `math_diff_abs`
 
-Diferencia absoluta.
+### Explicación en lenguaje humano
 
-| | |
-|---|---|
-| **Entrada** | `val_a`, `val_b` |
-| **Options** | ninguna |
-| **Retorno** | `abs(a - b)` o `null` |
+Mide **qué tan lejos** están dos números, sin importar quién es mayor. El resultado siempre es positivo (o cero).
+
+**Ejemplo real:** precio A `13` y precio B `10` → distancia `3`. Da igual si A es mayor o B.
+
+$$
+|a - b|
+$$
 
 ```python
 execute_transformation(10, 13, "math_diff_abs")
@@ -72,17 +90,21 @@ execute_transformation(10, 13, "math_diff_abs")
 
 ## `math_diff_pct`
 
-Diferencia porcentual relativa a A:
+### Explicación en lenguaje humano
 
-\[
+Responde: “¿en qué porcentaje se desvía B respecto de A?”. Usa A como referencia (el 100%).
+
+**Ejemplo real:** presupuesto A `100` y ejecutado B `80` → `20` (un 20% menos que la referencia).
+
+$$
 \frac{a - b}{a} \times 100
-\]
+$$
 
 | Caso | Retorno |
 |---|---|
-| Coerción fallida | `null` |
+| No se pueden leer como número | `null` |
 | `a == 0` y `b == 0` | `null` |
-| `a == 0` y `b != 0` | `math.inf` |
+| `a == 0` y `b != 0` | infinito (`inf`) |
 | Resto | porcentaje `float` |
 
 ```python
@@ -90,60 +112,63 @@ execute_transformation(100, 80, "math_diff_pct")
 # → result_value: 20.0
 ```
 
-`is_match` siempre `null` (no hay umbral embebido; usar `math_tolerance` para match).
+`is_match` siempre es `null`. Si necesitas un sí/no por margen, usa `math_tolerance`.
 
 ---
 
 ## `math_tolerance`
 
-Evalúa si A y B están dentro de un margen absoluto y/o porcentual.
+### Explicación en lenguaje humano
+
+En obra o contratos casi nunca exigimos igualdad exacta: un redondeo de 0.01 o un 2% suele ser aceptable. Este método pregunta: **¿la diferencia cabe dentro del margen que yo definí?**
+
+Puedes fijar:
+
+- un margen **absoluto** (`epsilon`), p. ej. “hasta 5 unidades”, y/o
+- un margen **porcentual** (`tolerance_pct`), p. ej. “hasta 2%”.
+
+Si defines ambos, **deben cumplirse los dos**.
+
+**Ejemplo real:** cantidad A `100`, B `102`, margen absoluto `5` → sí están dentro (±2 unidades).
 
 ### Options
 
 | Clave | Tipo | Efecto |
 |---|---|---|
-| `epsilon` | number | Exige `abs(a-b) <= epsilon` |
-| `tolerance_pct` | number | Exige `abs((a-b)/a)*100 <= tolerance_pct` (si `a==0`, exige `b==0`) |
-
-Si se pasan ambas, **ambas** deben cumplirse (`within = within and ...`).
+| `epsilon` | number | Exige $$|a - b| \le \epsilon$$ |
+| `tolerance_pct` | number | Exige que el % de desviación ≤ el valor; si `a = 0`, exige `b = 0` |
 
 ### Retorno (`result_value`)
 
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `is_within_tolerance` | `bool` | Resultado del chequeo |
-| `delta_abs` | `float` \| `null` | `abs(a-b)` |
-| `delta_pct` | `float` \| `null` | `%` relativo a A; `null` si `a==0` |
+| `is_within_tolerance` | `bool` | ¿Pasó el chequeo? |
+| `delta_abs` | `float` \| `null` | Distancia absoluta |
+| `delta_pct` | `float` \| `null` | Distancia en %; `null` si `a = 0` |
 
-`is_match` = `bool(is_within_tolerance)`.
+`is_match` copia `is_within_tolerance`.
 
 ```python
 execute_transformation(100, 102, "math_tolerance", {"epsilon": 5})
-# → result_value: { is_within_tolerance: true, delta_abs: 2.0, delta_pct: 2.0 }
+# → is_within_tolerance: true, delta_abs: 2.0, delta_pct: 2.0
 # → is_match: true
-```
-
-Si la coerción falla:
-
-```json
-{
-  "is_within_tolerance": false,
-  "delta_abs": null,
-  "delta_pct": null
-}
 ```
 
 ---
 
 ## `math_ratio`
 
-División A / B.
+### Explicación en lenguaje humano
 
-| Caso | Retorno |
-|---|---|
-| Coerción fallida | `null` |
-| `b == 0` | `null` |
-| OK | `a / b` |
+Divide A entre B. Sirve para ratios: “¿cuántas veces cabe B en A?”, rendimiento, factor de conversión, etc.
+
+**Ejemplo real:** 10 m² de acabado / 2 m² por unidad → ratio `5`.
+
+Si B es cero, no se puede dividir → `null`.
+
+$$
+\frac{a}{b}
+$$
 
 ```python
 execute_transformation(10, 2, "math_ratio")
