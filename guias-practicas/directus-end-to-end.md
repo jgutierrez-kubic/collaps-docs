@@ -1,249 +1,171 @@
 # Guía práctica: análisis end-to-end desde Directus
 
-Manual para configurar un cruce COLLAPS desde la colección **C Master Analisis** en Directus, **sin necesidad de programar**.
+Manual para configurar un cruce COLLAPS desde la colección **C Master Analisis** (o el Flow que la dispare), **sin programar**.
 
-Si sabes pensar en “tengo dos tablas, las uno por un ID y comparo unas columnas”, ya tienes el 90% del concepto.
+> Tras el Refactor Core, el **contrato HTTP** hacia el motor usa inglés y **camelCase** (`tableA`, `calculationMethods`, `targetTable`, …). En Directus puedes seguir viendo etiquetas en español: lo importante es que el Flow/webhook envíe los nombres nuevos al API.
 
 ---
 
 ## ¿Qué vas a lograr?
 
-1. Llenar un registro en **C Master Analisis** describiendo el cruce.  
-2. Disparar el análisis (webhook / flujo conectado a Directus).  
-3. Revisar la **tabla de resultados** que genera el sistema (y que Directus puede mostrar como colección).
+1. Definir un análisis (dos tablas, llaves, columnas y métodos).  
+2. Disparar el job al motor (`POST /api/v1/condenser/job`).  
+3. Revisar la tabla de resultados `c_results_*` (columnas indexadas + metadatos a la derecha).
 
 ```mermaid
 flowchart LR
-  A[C Master Analisis<br/>completas el formulario] --> B[Webhook / motor COLLAPS]
-  B --> C[Cruce en PostgreSQL]
-  C --> D[Cálculos por fila]
-  D --> E[Tabla de resultados<br/>visible en Directus]
+  A[C Master Analisis] --> B[Webhook / Flow]
+  B --> C[Motor camelCase]
+  C --> D[Chunks + cálculos]
+  D --> E[c_results_* en Directus]
 ```
 
 ---
 
-## Idea general (esquema ETL clásico)
+## Idea general (ETL)
 
-Piensa el análisis como una receta de cocina con tres capas:
-
-| Capa | Pregunta | Campos en Directus |
+| Capa | Pregunta | Concepto |
 |---|---|---|
-| **Origen** | ¿De dónde salen los datos? | Tabla A, Tabla B |
-| **Cruce** | ¿Cómo emparejo las filas? | Llave Cruce A, Llave Cruce B |
-| **Transformación** | ¿Qué comparo y cómo? | Columnas A, Columnas B, Metodos Calculo |
-
-Luego defines **dónde guardar** el resultado (tabla destino) y un nombre legible para el análisis.
+| Origen | ¿De dónde salen los datos? | Tabla A / Tabla B → API: `tableA`, `tableB` |
+| Cruce | ¿Cómo emparejo filas? | Llaves → `joinKeyA`, `joinKeyB` |
+| Transformación | ¿Qué comparo y cómo? | Columnas + métodos → `columnsA`, `columnsB`, `calculationMethods` |
+| Destino | ¿Dónde guardo? | Preferible `c_results_<nombreAmigable>` → `targetTable` |
 
 ---
 
-## Paso a paso en Directus
+## Etiquetas clave → contrato API
 
-### 1. Abre la colección **C Master Analisis**
-
-Crea un ítem nuevo (o edita uno existente). Cada ítem = **una configuración de análisis**.
-
-### 2. Completa las etiquetas clave
-
-Los nombres en pantalla pueden variar ligeramente (mayúsculas, espacios), pero el significado es este:
-
-#### Tabla A / Tabla B
-
-| Campo | Significado | Cómo llenarlo |
+| Etiqueta en Directus (humana) | Campo JSON al motor | Cómo llenarla |
 |---|---|---|
-| **Tabla A** | Primera fuente de datos (origen “lado A”) | Nombre de la tabla en la base, ej. `modelo`, `bim_cantidades` |
-| **Tabla B** | Segunda fuente (origen “lado B”) | Ej. `contrato`, `presupuesto` |
+| Tabla A | `tableA` | Nombre de tabla origen A (`modelo`) |
+| Tabla B | `tableB` | Nombre de tabla origen B (`contrato`) |
+| Llave Cruce A | `joinKeyA` | ID de join en A (`codigo`) |
+| Llave Cruce B | `joinKeyB` | ID de join en B |
+| Columnas A | `columnsA` | CSV de campos a calcular |
+| Columnas B | `columnsB` | CSV alineado 1:1 con A |
+| Metodos Calculo | `calculationMethods` | CSV de `method_id` exactos |
+| Nombre Analisis | `analysisName` | Texto legible |
+| Tabla Destino | `targetTable` | Ej. `c_results_precioFrutas` |
+| Schema | `schemaName` | Schema del proyecto |
+| Analysis ID | `analysisId` | Opcional |
 
-**Consejo:** A suele ser el modelo / lo medido; B suele ser el contrato / la referencia. Lo importante es ser consistente con las columnas y el método (sobre todo con restas).
+### Metodos Calculo
 
-No hace falta escribir el schema delante (`s00001_incancer.modelo`); el sistema ya trabaja con el schema del proyecto. Si lo escribes calificado, el motor se queda solo con el nombre de tabla.
+Escribe exactamente el `method_id` (o alias legacy):
 
-#### Llave Cruce A / Llave Cruce B
+- `math_sub`, `math_tolerance`, `strict_equal`, `normalized_equal`  
+- `fuzzy_levenshtein`, `date_equal`, …  
+- Legacy: `DIFERENCIA`, `IGUALDAD`  
 
-| Campo | Significado | Cómo llenarlo |
-|---|---|---|
-| **Llave Cruce A** | Campo de la Tabla A que identifica la fila | Ej. `codigo`, `id_partida`, `guid` |
-| **Llave Cruce B** | Campo equivalente en la Tabla B | Puede llamarse igual o distinto (`codigo_contrato`) |
+**Misma cantidad** de ítems en Columnas A, Columnas B y Métodos.
 
-Es el criterio del **JOIN**: “une la fila de A con la de B cuando estas llaves coinciden”.
-
-**Ejemplo:**  
-- Tabla A `modelo`, llave `codigo_item`  
-- Tabla B `contrato`, llave `codigo_item`  
-→ Cada código se empareja; si solo existe en un lado, igual aparece en el resultado marcado como *Only A* o *Only B*.
-
-#### Columnas A / Columnas B
-
-| Campo | Significado | Cómo llenarlo |
-|---|---|---|
-| **Columnas A** | Campos de A que se van a calcular | Uno o varios separados por coma |
-| **Columnas B** | Campos de B que se comparan **en el mismo orden** | Misma cantidad de nombres |
-
-Aquí no pones la llave de cruce (salvo que también quieras calcular sobre ella). Pones lo que vas a **medir o comparar**: cantidades, precios, fechas, textos…
-
-**Ejemplo**
+Ejemplo:
 
 ```text
-Columnas A: cantidad,precio
-Columnas B: cantidad,precio
+columnsA:             cantidad,descripcion
+columnsB:             cantidad,descripcion
+calculationMethods:   math_sub,normalized_equal
 ```
 
-Eso significa dos pares:
+---
 
-1. `cantidad` (A) contra `cantidad` (B)  
-2. `precio` (A) contra `precio` (B)
+## Ejemplo completo
 
-#### Metodos Calculo
-
-| Campo | Significado | Cómo llenarlo |
+| Campo UI | Valor | JSON |
 |---|---|---|
-| **Metodos Calculo** | Qué operación aplica a **cada** par de columnas | Lista de `method_id` separados por coma, **en el mismo orden** |
+| Tabla A | `modelo` | `"tableA": "modelo"` |
+| Tabla B | `contrato` | `"tableB": "contrato"` |
+| Llave A/B | `codigo` | `"joinKeyA"/"joinKeyB"` |
+| Columnas | `cantidad,descripcion` | `columnsA` / `columnsB` |
+| Métodos | `math_sub,normalized_equal` | `calculationMethods` |
+| Nombre | `Precio Frutas` | `analysisName` |
+| Destino | `c_results_precioFrutas` | `targetTable` |
 
-Debes escribir exactamente el identificador del método, por ejemplo:
+Payload resultante (simplificado):
 
-- `math_sub` — resta A − B  
-- `math_diff_abs` — diferencia absoluta  
-- `strict_equal` — igualdad exacta  
-- `normalized_equal` — igualdad ignorando acentos/mayúsculas  
-- `fuzzy_levenshtein` — similitud de texto (typos)  
-- `date_equal` — mismo día  
-- `DIFERENCIA` / `IGUALDAD` — alias antiguos (ver [Legacy](../motor-matematico/legacy.md))
-
-**Ejemplo alineado con las columnas de arriba**
-
-```text
-Columnas A:       cantidad,precio
-Columnas B:       cantidad,precio
-Metodos Calculo:  math_sub,strict_equal
+```json
+{
+  "source": "directus",
+  "analysisName": "Precio Frutas",
+  "tableA": "modelo",
+  "tableB": "contrato",
+  "joinKeyA": "codigo",
+  "joinKeyB": "codigo",
+  "columnsA": "cantidad,descripcion",
+  "columnsB": "cantidad,descripcion",
+  "calculationMethods": "math_sub,normalized_equal",
+  "targetTable": "c_results_precioFrutas"
+}
 ```
 
-Lectura humana:
-
-1. Compara cantidades con resta (`math_sub`).  
-2. Compara precios con igualdad estricta (`strict_equal`).
-
-> La cantidad de métodos **debe coincidir** con la cantidad de columnas A y B.  
-> Tres columnas A → tres columnas B → tres métodos.
-
-Catálogo completo: [Conceptos base](../motor-matematico/conceptos-base.md) y páginas del motor matemático.
-
-#### Otros campos útiles
-
-| Campo típico | Para qué sirve |
-|---|---|
-| **Nombre Analisis** / `nombre_analisis` | Etiqueta legible (“Cruce modelo vs contrato — torre A”). Se guarda en las filas de resultado. |
-| **Tabla Destino** / `tabla_destino` | Nombre de la tabla donde se **añaden** (append) los resultados. Ej. `c_resultado_cruce`. |
-| **Schema** / `schema_name` | Schema del proyecto (a menudo ya viene por defecto del entorno). |
-| **Analysis ID** | Identificador del análisis (si el flujo lo genera o lo pegas a mano). |
-
 ---
 
-## Ejemplo completo de configuración
+## Qué pasa al disparar
 
-Escenario: comparar cantidades y descripción entre modelo y contrato.
-
-| Etiqueta | Valor de ejemplo |
-|---|---|
-| Tabla A | `modelo` |
-| Tabla B | `contrato` |
-| Llave Cruce A | `codigo` |
-| Llave Cruce B | `codigo` |
-| Columnas A | `cantidad,descripcion` |
-| Columnas B | `cantidad,descripcion` |
-| Metodos Calculo | `math_sub,normalized_equal` |
-| Tabla Destino | `c_resultado_modelo_contrato` |
-| Nombre Analisis | `Cruce cantidades y descripción — Jul 2026` |
-
-Interpretación:
-
-- Une por `codigo`.  
-- Resta cantidades (A − B).  
-- Compara descripciones tolerando mayúsculas/acentos (`Café` ≈ `cafe`).  
-- Guarda (acumula) filas en `c_resultado_modelo_contrato`.
-
----
-
-## Qué pasa al disparar el análisis
-
-1. Directus (o el flujo asociado) envía la configuración al motor COLLAPS.  
-2. El motor responde rápido “aceptado” y trabaja en segundo plano.  
-3. Cruza las tablas, aplica los métodos fila a fila y **añade** filas a la tabla destino.  
-4. Si el proyecto tiene Directus configurado, intenta **registrar** esa tabla como colección para que la veas en el panel.
-
-No necesitas borrar la tabla destino cada vez: el sistema **agrega** corridas (cada una con su `run_id` y fecha).
+1. El motor responde `202` con `jobId` (no esperes el resultado en esa respuesta).  
+2. Procesa el cruce en **bloques de 50.000 filas** (no carga toda la tabla en RAM).  
+3. Asigna un `run_id` **entero** (1, 2, 3…) a toda la corrida.  
+4. Añade filas a `targetTable` y, si puede, registra la colección en Directus.
 
 ---
 
 ## Cómo leer la tabla de resultados
 
-Cuando abras la colección / tabla de resultados, verás algo así (nombres aproximados):
+### Bloques por par (izquierda)
 
-### Columnas del cruce
+Para el primer par (índice `0`), el segundo (`1`), etc.:
 
-| Columna | Significado |
-|---|---|
-| `llave_cruce` | ID con el que se unieron las filas |
-| `estado_cruce` | `Match` = estaba en A y B; `Only A` / `Only B` = solo en un lado |
-| `..._a` / `..._b` | Valores originales de cada lado (llaves y columnas analizadas) |
-
-### Columnas del cálculo
-
-Según el método, aparecen columnas con nombres del estilo:
-
-| Patrón | Ejemplo | Significado |
+| Columna | Ejemplo | Significado |
 |---|---|---|
-| `{col}__{metodo}` | `cantidad__math_sub` | Resultado del cálculo cuando A y B usan el mismo nombre de columna |
-| `{colA}__vs__{colB}__{metodo}` | `precio__vs__costo__math_sub` | Resultado cuando los nombres difieren |
-| `is_match__...` | `is_match__descripcion__fuzzy_levenshtein` | ¿El motor considera que hubo coincidencia? (cuando aplica) |
+| `{i}_{campo}A` | `0_cantidadA` | Valor lado A |
+| `{i}_{campo}B` | `0_cantidadB` | Valor lado B |
+| `{i}_metodo_aplicado` | `0_metodo_aplicado` | Método pedido |
+| `{i}_{metodo}` | `0_math_sub` | Resultado |
+| `{i}_is_match` | `0_is_match` | ¿Match? (si aplica) |
 
-Para métodos de sí/no (`strict_equal`, `normalized_equal`, etc.), el propio valor de la columna de resultado ya es `true`/`false`.
+Así todos los cálculos del mismo par quedan **agrupados** visualmente.
 
-### Metadatos de la corrida
+### Metadatos (extrema derecha)
 
-| Columna | Para qué sirve |
+Siempre al final:
+
+`run_id` · `created_at` · `timestamp` · `job_id` · `estado_cruce` · `analysis_id` · `analysis_name` · `source`
+
+| Campo | Uso práctico |
 |---|---|
-| `run_id` | Identifica esa ejecución (puedes filtrar “solo esta corrida”) |
-| `created_at` | Cuándo se generó |
-| `nombre_analisis` | El nombre que pusiste en Directus |
-| `analysis_id` | ID del análisis, si venía en el payload |
-| `source` | Origen del disparo (`directus` o `n8n`) |
-| `id` | Clave interna de Directus / Postgres |
+| `run_id` | Filtra “solo la última corrida” (número entero) |
+| `estado_cruce` | `Match` / `Only A` / `Only B` |
+| `job_id` | Traza técnica del encolado HTTP |
+| `analysis_name` | El nombre que pusiste en Directus |
 
-### Cómo filtrar en la práctica
+### Cómo filtrar
 
-1. Ordena o filtra por `created_at` / `run_id` para ver la última corrida.  
-2. Mira `estado_cruce = Only A` o `Only B` para códigos que no cruzaron.  
-3. En columnas numéricas (`...__math_sub`), busca diferencias distintas de cero.  
-4. En columnas de igualdad/similitud, filtra `false` o `is_match = false` para excepciones.
+1. Filtra por el `run_id` más alto.  
+2. Revisa `Only A` / `Only B` para faltantes.  
+3. En `0_math_sub` (u otro), busca diferencias ≠ 0.  
+4. En iguales/fuzzy, busca `false` o `0_is_match = false`.
 
 ---
 
-## Errores frecuentes (y cómo evitarlos)
+## Errores frecuentes
 
-| Problema | Causa típica | Qué hacer |
-|---|---|---|
-| El análisis no arranca | Falta un campo obligatorio o un método mal escrito | Revisa que Tabla A/B, llaves, columnas, métodos y destino estén llenos; el `method_id` debe existir |
-| “No coinciden las listas” | 3 columnas A pero 2 métodos | Misma cantidad en Columnas A, Columnas B y Metodos Calculo |
-| Resultados con signo “al revés” | Usaste `DIFERENCIA` vs `math_sub` | Lee [Legacy](../motor-matematico/legacy.md): `DIFERENCIA` calcula B − A |
-| Muchas filas duplicadas | La llave de cruce no es única | Elige un ID único por fila en ambas tablas |
-| No veo la colección nueva | Primera vez o sin credenciales Directus en el portal | Pide a TI que revise `portal_projects` / registro de colección; la tabla puede existir igual en la base |
+| Problema | Qué revisar |
+|---|---|
+| `422` del API | Campos camelCase, métodos válidos, CSVs alineados |
+| Signo “al revés” | `DIFERENCIA` (B−A) vs `math_sub` (A−B) |
+| Muchas filas | Llave de cruce no única |
+| No veo colección | Primera vez / credenciales Directus; la tabla puede existir igual en PG |
 
----
+## Checklist
 
-## Checklist rápido antes de disparar
-
-- [ ] Tablas A y B existen y tienen datos  
-- [ ] Llaves de cruce identifican bien cada fila  
-- [ ] Columnas A/B/métodos tienen **la misma cantidad** de ítems  
-- [ ] Cada método está escrito exactamente (`math_sub`, no “resta”)  
-- [ ] Tabla destino definida (y sabes que se hará *append*)  
-- [ ] Nombre de análisis claro para filtrar después  
-
----
+- [ ] `tableA` / `tableB` / llaves correctas  
+- [ ] Misma cantidad en columnsA, columnsB, calculationMethods  
+- [ ] `method_id` exactos  
+- [ ] `targetTable` con prefijo `c_results_` recomendado  
+- [ ] Nombre de análisis claro para filtrar por `analysis_name` / `run_id`
 
 ## Siguiente lectura
 
-| Si quieres… | Ve a… |
-|---|---|
-| Entender un método concreto | [Motor matemático](../motor-matematico/conceptos-base.md) |
-| Ver el contrato técnico JSON | [Payload y contratos](../orquestador/payload-y-contratos.md) |
-| Entender el flujo completo del sistema | [Flujo end-to-end](../arquitectura/flujo-end-to-end.md) |
+- [Payload y contratos](../orquestador/payload-y-contratos.md)  
+- [Motor matemático](../motor-matematico/conceptos-base.md)  
+- [WorkTables](../orquestador/worktables.md) (tablas `w_table_*`)

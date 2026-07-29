@@ -69,14 +69,16 @@ Es simplemente “¿son iguales tal cual?”, igual que `strict_equal`. No limpi
 
 ## Uso en el payload / Directus
 
+Campo wire: **`calculationMethods`** (antes `metodos_calculo`).
+
 ```text
-Metodos Calculo: DIFERENCIA,IGUALDAD
+calculationMethods: DIFERENCIA,IGUALDAD
 ```
 
 Equivalente moderno (ojo al signo de la resta):
 
 ```text
-Metodos Calculo: math_sub,strict_equal
+calculationMethods: math_sub,strict_equal
 ```
 
 ---

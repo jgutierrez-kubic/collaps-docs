@@ -1,186 +1,111 @@
 # Flujo end-to-end
 
-Documenta el ciclo de vida completo de un análisis COLLAPS: desde que n8n arma el payload hasta que los resultados viven en PostgreSQL y la colección queda registrada en Directus.
+Ciclo de vida de un análisis COLLAPS tras el Refactor Core: contrato camelCase, chunks anti-OOM, columnas indexadas y `run_id` incremental.
 
-## Diagrama de secuencia
+## Diagrama de secuencia (Condenser)
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant Ops as Operador / Workflow n8n
-  participant Nodes as Nodos Collaps*
+  participant Ops as Operador / n8n
   participant Trig as CollapsBttfTrigger
-  participant API as FastAPI POST /job
-  participant AE as AnalysisEngine.run
+  participant API as FastAPI POST /condenser/job
+  participant AE as AnalysisEngine
   participant PG as PostgreSQL
   participant CE as collaps_engine
   participant DX as Directus
-  participant Wait as n8n resumeUrl
+  participant Wait as resumeUrl
 
-  Ops->>Nodes: Configura schema, tablas, columnas, métodos
-  Nodes->>Trig: bttfPayload + metodos_calculo
-  Trig->>API: POST AnalysisPayload (JSON)
-  API-->>Trig: 202 Accepted { job_id, analysis_id, status }
-  API->>AE: BackgroundTasks.add_task(engine.run, job_id)
+  Ops->>Trig: Analysis Name + estructura + métodos
+  Trig->>Trig: targetTable = c_results_camelCase
+  Trig->>API: AnalysisPayload camelCase
+  API-->>Trig: 202 { jobId, analysisId }
+  API->>AE: BackgroundTasks.run(jobId)
 
-  AE->>PG: Stats de unicidad (COUNT / COUNT DISTINCT)
-  AE->>PG: FULL OUTER JOIN (pd.read_sql)
-  PG-->>AE: DataFrame cruce
-
-  loop Por cada par (columna_a, columna_b, método)
-    AE->>CE: execute_transformation(val_a, val_b, method_id)
-    CE-->>AE: result_value, is_match, error
+  AE->>PG: Stats unicidad + SQL JOIN
+  loop Chunks de 50.000 filas
+    AE->>PG: read_sql chunk
+    AE->>CE: df.apply execute_transformation
+    AE->>AE: columnas {i}_colA / {i}_método
+    AE->>PG: replace|append + run_id compartido
+    AE->>AE: acumular summary camelCase
   end
 
-  AE->>PG: ALTER TABLE ADD COLUMN IF NOT EXISTS (migración)
-  AE->>PG: to_sql(append) + id SERIAL PRIMARY KEY
-  AE->>PG: SELECT credenciales FROM public.portal_projects
-  alt Credenciales Directus presentes
-    AE->>DX: POST /collections { collection }
-    DX-->>AE: 200 creado / 400 ya existe (ok)
-  end
-
-  opt callback_url HTTP(S)
-    AE->>Wait: POST { status, analysis_id, schema, summary }
-    Wait-->>Ops: Reanuda workflow n8n
+  AE->>DX: POST /collections (idempotente)
+  opt callbackUrl
+    AE->>Wait: POST { status, jobId, summary.totalRows, ... }
   end
 ```
 
-## Fase 1 — Construcción del payload en n8n
+## Fase 1 — Construcción en n8n
 
-Orden recomendado de nodos:
+1. DbConnection → Schema → Tables → Columns (× lados A/B).  
+2. KeyColumnMapper → MethodConfigurator.  
+3. **CollapsBttfTrigger**: solo pide *Analysis Name*; genera `targetTable` y `callbackUrl`.  
+4. Opcional en paralelo: **CollapsWorkTableGenerator** → `/worktables/create`.
 
-1. **Trigger** (manual, webhook u otro).
-2. **`CollapsDbConnection`** — valida PostgreSQL y propaga host/port/database/user.
-3. **`CollapsSchemaFetcher`** — selecciona `schema` (p. ej. `s00001_incancer`).
-4. **Dos `CollapsTableSelector`** — tabla A y tabla B.
-5. **Cuatro `CollapsColumnSelector`** — Key A, Columns A, Key B, Columns B.
-6. **`CollapsKeyColumnMapper`** — fusiona las 4 ramas y emite `bttfPayload` + `column_pairs[]`.
-7. **`CollapsMethodConfigurator`** — asigna métodos (global o por par) y emite `metodos_calculo`.
-8. **`CollapsBttfTrigger`** — añade `nombre_analisis`, `tabla_destino`, `callback_url` opcional y hace el POST.
+Detalle: [Integración n8n](../orquestador/integracion-n8n.md).
 
-> Opcional: insertar un nodo **Wait** de n8n antes o en coordinación con el trigger para que `$execution.resumeUrl` exista y el engine pueda reanudar el flujo al terminar.
-
-Detalle de mapeo campo a campo: [Integración n8n](../orquestador/integracion-n8n.md).
-
-## Fase 2 — Aceptación del job (síncrona)
+## Fase 2 — Aceptación (`202`)
 
 ```http
 POST /api/v1/condenser/job
 Content-Type: application/json
 ```
 
-1. FastAPI deserializa el body como `AnalysisPayload` (validación Pydantic).
-2. Si falla la validación → **`422 Unprocessable Entity`** (el job no se encola).
-3. Si es válido:
-   - Genera `job_id = uuid4()`.
-   - Instancia `AnalysisEngine(payload)`.
-   - Encola `engine.run(job_id)` en `BackgroundTasks`.
-   - Responde **`202 Accepted`** de inmediato:
-
 ```json
 {
   "status": "accepted",
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "analysis_id": "n8n_1722096123456",
-  "message": "Análisis encolado exitosamente"
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "analysisId": "n8n_1722096123456",
+  "message": "Analysis job queued successfully"
 }
 ```
 
-En este punto el cliente n8n **ya puede continuar**; el trabajo pesado aún no ha terminado.
+Payload inválido → `422` (no se encola).
 
-## Fase 3 — Ejecución en background (`AnalysisEngine.run`)
+## Fase 3 — Ejecución chunked
 
-### 3.1 Inicialización
-
-- Recibe `job_id` del endpoint.
-- Genera un `run_id` nuevo (`uuid4`) por ejecución (permite re-ejecuciones distinguibles).
-- Marca `created_at` en UTC.
-
-### 3.2 Generación del SQL de cruce
-
-`build_analysis_sql(payload)` produce un `FULL OUTER JOIN` tipado como texto SQL. Columnas de salida típicas:
-
-| Columna | Significado |
+| Aspecto | Comportamiento |
 |---|---|
-| `llave_cruce` | `COALESCE` de las llaves A/B |
-| `<llave>_a` / `<llave>_b` | Llaves originales de cada lado |
-| `estado_cruce` | `Match` \| `Only A` \| `Only B` |
-| `<col>_a` / `<col>_b` | Pares de columnas de análisis |
+| Lectura | `chunksize=50000` |
+| Transform | `df.apply(axis=1)` por par de columnas |
+| Columnas resultado | Bloques indexados `0_*`, `1_*`, … |
+| Metadatos | Al final: `run_id`, `created_at`, `timestamp`, `job_id`, `estado_cruce`, … |
+| `run_id` | Entero `MAX+1`, **una vez por job**, mismo valor en todos los chunks |
+| Persistencia | `replace` solo primer chunk si la tabla es nueva; luego `append` |
+| Summary | Acumulado dinámico para el webhook |
 
-Antes del JOIN, el engine consulta estadísticas de unicidad y registra un **warning** si las llaves no son únicas (riesgo de producto cartesiano). **No aborta** el job.
+## Fase 4 — Observabilidad
 
-### 3.3 Transformaciones matemáticas
+| Artefacto | Dónde |
+|---|---|
+| Filas | `schema.targetTable` (p. ej. `c_results_precioFrutas`) |
+| Colección UI | Directus (si hay credenciales en `portal_projects`) |
+| Señal n8n | Callback camelCase a `callbackUrl` |
+| Logs | Cloud Run / Uvicorn |
 
-Para cada triple `(columna_a, columna_b, metodo)` y cada fila del DataFrame:
+## WorkTables (flujo hermano)
 
-1. Resuelve alias legacy si aplica (`DIFERENCIA` → `math_sub` con operandos invertidos; `IGUALDAD` → `strict_equal`).
-2. Llama `collaps_engine.execute_transformation(val_a, val_b, method_id)`.
-3. Escribe columnas de resultado:
-   - Mismo nombre de columna: `{col}__{method}`
-   - Nombres distintos: `{col_a}__vs__{col_b}__{method}`
-   - Para métodos no booleanos puros: también `is_match__{result_col}`
-
-### 3.4 Persistencia
-
-1. Sella metadatos: `run_id`, `created_at`, `analysis_id` (si hay), `nombre_analisis` (si hay), `source`.
-2. `_auto_migrate_table`: añade columnas nuevas con `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
-3. `DataFrame.to_sql(..., if_exists="append")` sobre `schema_name.tabla_destino`.
-4. Garantiza `id SERIAL PRIMARY KEY` para compatibilidad con Directus.
-
-### 3.5 Registro Directus
-
-Si `public.portal_projects` tiene credenciales para el `schema_name`:
-
-- `POST {directus_url}/collections` con `{"collection": "<tabla_destino>"}`.
-- Colección ya existente → se ignora (idempotente).
-- Error de red / HTTP inesperado → warning en logs; **no falla** el job de persistencia.
-
-### 3.6 Callback a n8n
-
-Si `callback_url` es HTTP(S), el engine hace `POST` con:
-
-```json
-{
-  "status": "success",
-  "analysis_id": "n8n_1722096123456",
-  "schema": "s00001_incancer",
-  "summary": {
-    "total_rows": 120,
-    "matches": 100,
-    "only_a": 12,
-    "only_b": 8,
-    "has_duplicates": false
-  }
-}
+```text
+CollapsWorkTableGenerator
+  → POST /api/v1/worktables/create
+    → 202 { jobId, targetTable }
+      → WorktableEngine (GROUP BY / ORDER BY → w_table_*)
 ```
 
-En caso de excepción no controlada durante el job, el callback (si existe) se envía con `"status": "failed"`. Un fallo al hacer el callback **no** relanza la excepción del job.
+Ver [WorkTables](../orquestador/worktables.md).
 
-## Fase 4 — Estado final observable
-
-| Artefacto | Dónde queda |
-|---|---|
-| Filas de resultado | Tabla destino en PostgreSQL (append) |
-| Colección UI | Directus (si credenciales disponibles) |
-| Señal a n8n | Body del callback a `resumeUrl` |
-| Trazas operativas | Logs del proceso Cloud Run / Uvicorn |
-
-No hay endpoint de consulta por `job_id`. Si no se configuró `callback_url`, el único rastro post-`202` son los logs y la tabla destino.
-
-## Casos de borde importantes
+## Casos de borde
 
 | Situación | Comportamiento |
 |---|---|
-| Payload inválido | `422` síncrono; no hay background task |
+| Payload con campos españoles antiguos | No es el contrato oficial; el Trigger n8n ya traduce |
 | Llaves no únicas | Warning + posible multiplicación de filas |
-| Tabla destino sin columnas nuevas | Append directo; migración no-op |
-| Directus sin fila en `portal_projects` | Se omite el registro; job sigue |
-| Engine reiniciado a mitad del job | Job perdido (sin cola durable) |
-| `callback_url` vacío o no HTTP | No se notifica a n8n |
+| Engine reiniciado mid-job | Chunks en curso se pierden (sin cola durable) |
+| Sin `callbackUrl` | Solo logs + tabla destino |
 
 ## Referencias
 
-- Endpoint y asincronía: [FastAPI / AnalysisEngine](../orquestador/fastapi-analysisengine.md)
-- Contrato JSON: [Payload y contratos](../orquestador/payload-y-contratos.md)
-- Ensamblado desde nodos: [Integración n8n](../orquestador/integracion-n8n.md)
+- [Payload y contratos](../orquestador/payload-y-contratos.md)
+- [FastAPI / AnalysisEngine](../orquestador/fastapi-analysisengine.md)

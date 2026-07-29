@@ -36,9 +36,9 @@ result = execute_transformation(val_a, val_b, method_id, options={})
 
 ### De dónde salen `val_a` y `val_b` en el orquestador
 
-Tras el `FULL OUTER JOIN`, `AnalysisEngine` lee por fila las columnas `{columna_a}_a` y `{columna_b}_b` y las pasa a `execute_transformation`.
+Tras el `FULL OUTER JOIN`, `AnalysisEngine` lee por fila las columnas `{columna}_a` / `{columna}_b` del SQL, aplica `df.apply`, y materializa bloques indexados `{i}_{col}A` / `{i}_{col}B` / `{i}_{method}` en la tabla destino.
 
-**Hoy el HTTP `AnalysisPayload` no transporta `options`**: el orquestador llama con `options={}` (defaults). Las `options` documentadas aplican a uso directo del engine o a evoluciones futuras del contrato.
+**Hoy el HTTP `AnalysisPayload` (camelCase: `columnsA`, `calculationMethods`, …) no transporta `options`**: el orquestador llama con `options={}` (defaults). Las `options` documentadas aplican a uso directo del engine o a evoluciones futuras del contrato.
 
 ---
 

@@ -1,22 +1,19 @@
 # FastAPI / AnalysisEngine
 
-Documentación del orquestador HTTP **Condenser CORE** y del motor de jobs `AnalysisEngine`.
+Orquestador HTTP **Condenser CORE** y motor de jobs `AnalysisEngine` tras el Refactor Core.
 
 ## Servicio
 
 | Atributo | Valor |
 |---|---|
 | Título OpenAPI | `Condenser CORE` |
-| Descripción | Motor asíncrono de procesamiento de datos — Módulo C (Collpaps BIM-OS) |
 | Versión | `0.1.0` |
-| Entrada | `main.py` → incluye router `condenser` |
-| UI estática | Montada en `/app` (`static/`); `/` redirige a `/app` |
+| Routers | `/api/v1/condenser` + `/api/v1/worktables` |
+| UI estática | `/app` |
 
 ```python
-# main.py (esqueleto)
-app = FastAPI(title="Condenser CORE", version="0.1.0")
-app.include_router(condenser_router)  # prefix /api/v1/condenser
-app.mount("/app", StaticFiles(directory="static", html=True), name="static")
+app.include_router(condenser_router)   # /api/v1/condenser
+app.include_router(worktable_router)   # /api/v1/worktables
 ```
 
 ---
@@ -25,177 +22,126 @@ app.mount("/app", StaticFiles(directory="static", html=True), name="static")
 
 | Propiedad | Valor |
 |---|---|
-| Método / ruta | `POST /api/v1/condenser/job` |
-| Handler | `create_analysis_job` en `app/api/endpoints.py` |
-| Body | `AnalysisPayload` (JSON) |
+| Handler | `create_analysis_job` |
+| Body | `AnalysisPayload` (JSON **camelCase**) |
 | Éxito | `202 Accepted` |
-| Validación fallida | `422 Unprocessable Entity` (FastAPI + Pydantic) |
+| Validación | `422` |
 
-### Comportamiento del handler
-
-```python
-job_id = str(uuid4())
-engine = AnalysisEngine(payload)
-background_tasks.add_task(engine.run, job_id)
-
-return JSONResponse(
-    status_code=202,
-    content={
-        "status": "accepted",
-        "job_id": job_id,
-        "analysis_id": payload.analysis_id,
-        "message": "Análisis encolado exitosamente",
-    },
-)
-```
-
-### Respuesta `202`
+### Respuesta `202` (camelCase)
 
 ```json
 {
   "status": "accepted",
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "analysis_id": "n8n_1722096123456",
-  "message": "Análisis encolado exitosamente"
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "analysisId": "n8n_1722096123456",
+  "message": "Analysis job queued successfully"
 }
 ```
 
-| Campo | Tipo | Notas |
-|---|---|---|
-| `status` | string | Siempre `"accepted"` en este camino |
-| `job_id` | string (UUID4) | Identificador del encolado; **no** se persiste en una tabla de jobs |
-| `analysis_id` | string \| null | Eco de `payload.analysis_id` |
-| `message` | string | Mensaje fijo de aceptación |
+```python
+background_tasks.add_task(engine.run, job_id)
+```
 
-### Códigos de estado
-
-| Código | Cuándo |
-|---|---|
-| `202` | Payload válido; task encolada |
-| `422` | Fallo de validación Pydantic (campo extra, método inválido, identificador SQL ilegal, etc.) |
-| Errores del job en background | **No** se reflejan en la respuesta HTTP del POST (ya se respondió 202) |
+El trabajo pesado corre en `BackgroundTasks` del mismo proceso (no es una cola durable).
 
 ---
 
-## Asincronía con `BackgroundTasks`
-
-### Modelo de ejecución
+## Asincronía y rendimiento (Anti-OOM)
 
 ```mermaid
 flowchart TD
-  A[Request HTTP] --> B[Validar AnalysisPayload]
-  B -->|422| C[Respuesta error síncrona]
-  B -->|OK| D[Generar job_id]
-  D --> E[background_tasks.add_task engine.run]
-  E --> F[Responder 202]
-  F -.-> G[Misma instancia: engine.run en background]
-  G --> H[JOIN + transform + persist + Directus + callback]
+  A[POST /job → 202] --> B[BackgroundTasks: engine.run]
+  B --> C[SQL FULL OUTER JOIN en chunks de 50.000]
+  C --> D[Transformaciones con df.apply axis=1]
+  D --> E{¿Primer chunk y tabla nueva?}
+  E -->|sí| F[to_sql if_exists=replace]
+  E -->|no| G[to_sql if_exists=append]
+  F --> H[Acumular summary]
+  G --> H
+  H --> I{¿Más chunks?}
+  I -->|sí| C
+  I -->|no| J[Directus + callback camelCase]
 ```
 
-FastAPI ejecuta las tareas de `BackgroundTasks` **después** de enviar la respuesta, en el mismo proceso del worker. Implicaciones:
-
-| Aspecto | Comportamiento actual |
+| Mejora | Detalle |
 |---|---|
-| Cola durable | No — memoria del proceso |
-| Reintentos | No automáticos |
-| Escalado horizontal | Un job vive en la instancia que lo aceptó |
-| Reinicio Cloud Run | Puede abortar jobs en curso |
-| Observabilidad de estado | Solo logs + `callback_url` |
-| Aislamiento | Un job pesado compite por CPU/memoria con el servidor HTTP |
-
-Esto es suficiente para cargas moderadas y el patrón Wait/resume de n8n, pero **no** sustituye a Celery/Cloud Tasks/Pub-Sub si se necesitan garantías fuertes.
+| Chunking | `SQL_CHUNK_SIZE = 50_000` vía `pd.read_sql(..., chunksize=...)` |
+| Persistencia | Primer chunk en tabla nueva → `replace`; resto → `append` |
+| Vectorización | `df.apply(..., axis=1)` — **sin** `iterrows()` |
+| Summary | Se acumula chunk a chunk (`totalRows`, `matches`, `onlyA`, `onlyB`) |
+| `run_id` | Entero `MAX(run_id)+1`, calculado **una vez** por job y reutilizado en todos los chunks |
 
 ---
 
-## `AnalysisEngine` — ciclo interno
+## Ciclo interno de `AnalysisEngine.run`
 
-Clase: `app/core/analysis_engine.py`  
-Entrada: `AnalysisEngine(payload).run(job_id)`
+| Paso | Acción |
+|---|---|
+| 1 | Asigna `job_id` (UUID) y timestamp UTC |
+| 2 | `build_analysis_sql` → FULL OUTER JOIN |
+| 3 | Stats de unicidad de llaves (warning si no son únicas) |
+| 4 | Itera chunks de 50k filas |
+| 5 | Por chunk: `df.apply` + columnas indexadas `{i}_colA` / `{i}_método` |
+| 6 | Reordena metadatos al final; persiste; acumula summary |
+| 7 | Auto-registro Directus (idempotente) |
+| 8 | Callback HTTP a `callbackUrl` |
 
-| Paso | Método / módulo | Acción |
+### `jobId` vs `run_id`
+
+| ID | Tipo | Rol |
 |---|---|---|
-| 1 | `run` | Inicializa `run_id`, timestamps |
-| 2 | `build_analysis_sql` | Construye SQL `FULL OUTER JOIN` |
-| 3 | `_fetch_source_uniqueness_stats` | Warning si llaves no únicas |
-| 4 | `_execute_analysis_query` | `pd.read_sql` contra `get_db_engine()` |
-| 5 | `_build_analytical_summary` | Conteos Match / Only A / Only B |
-| 6 | `_apply_collaps_transformations` | Loop fila × método → `execute_transformation` |
-| 7 | `_persist_result` | Metadatos + migración + `to_sql(append)` + PK |
-| 8 | `_register_directus_collection` | Registro idempotente en Directus |
-| 9 | `_send_callback` | POST a `callback_url` si es HTTP(S) |
+| `jobId` | UUID string | Encolado HTTP + campo `job_id` en filas + callback |
+| `run_id` | int incremental | Corrida de negocio por tabla destino; compartido entre chunks |
 
-### Identificadores: `job_id` vs `run_id`
-
-| ID | Origen | Uso |
-|---|---|---|
-| `job_id` | Endpoint (`uuid4`) | Trazabilidad del encolado en logs / respuesta 202 |
-| `run_id` | Generado dentro de `run` (`uuid4`) | Columna persistida en cada fila de resultado; distingue re-ejecuciones |
-
-### Callback de finalización
-
-Si `payload.callback_url` comienza por `http://` o `https://`:
+### Callback
 
 ```json
 {
-  "status": "success | failed",
-  "analysis_id": "<payload.analysis_id>",
-  "schema": "<payload.schema_name>",
+  "status": "success",
+  "analysisId": "...",
+  "schema": "s00001_incancer",
+  "jobId": "...",
   "summary": {
-    "total_rows": 0,
-    "matches": 0,
-    "only_a": 0,
-    "only_b": 0,
-    "has_duplicates": false
+    "totalRows": 120,
+    "matches": 100,
+    "onlyA": 12,
+    "onlyB": 8,
+    "hasDuplicates": false
   }
 }
 ```
-
-Fallos al notificar se registran en log y **no** revierten la persistencia ya realizada.
 
 ---
 
 ## Endpoint auxiliar: `POST /api/v1/condenser/upload`
 
-Fuera del flujo BTTF principal, pero parte del mismo router.
-
-| Campo | Tipo | Descripción |
-|---|---|---|
-| `file` | multipart file | Archivo a subir |
-| `project_id` | form | Prefijo de ruta |
-| `subfolder` | form | Default `"docs"` |
-
-Respuesta:
-
-```json
-{ "status": "success", "gcs_path": "gs://... o local://data/..." }
-```
-
-`StorageManager` intenta GCS (`GCS_BUCKET_NAME`); si falla, guarda en `data/` local.
+Multipart → GCS (o fallback local). Sin cambios de contrato camelCase en el body form.
 
 ---
 
-## Dependencias de configuración (orquestación)
+## Endpoint hermano: WorkTables
+
+`POST /api/v1/worktables/create` — materializa tablas de trabajo agrupadas. Ver [WorkTables](worktables.md).
+
+---
+
+## Configuración
 
 | Variable | Obligatoria para `/job` | Rol |
 |---|---|---|
-| `DATABASE_URL` | Sí | Engine SQLAlchemy; sin ella el análisis falla en ejecución |
-| `GCS_BUCKET_NAME` | No | Solo `/upload` (default `bim-saas-storage-collaps-prod`) |
-| `PORT` | No | Puerto Uvicorn (Cloud Run, default 8080) |
+| `DATABASE_URL` | Sí | Engine SQLAlchemy |
+| `GCS_BUCKET_NAME` | No | Solo `/upload` |
+| `PORT` | No | Default `8080` |
 
-Credenciales Directus **no** vienen de env: se leen de `public.portal_projects` en tiempo de ejecución.
+## Límites
 
----
-
-## Límites y deuda del orquestador
-
-1. No existe `GET /api/v1/condenser/job/{job_id}`.
-2. `get_db_engine()` usa `@lru_cache`: rotar `DATABASE_URL` requiere reiniciar el proceso.
-3. Transformaciones en Python fila a fila (no vectorizadas): coste crece con filas × pares.
-4. UI en `/app` no está alineada al contrato `AnalysisPayload` actual.
-5. `bttf_engine.CondenserEngine` es legacy y no está expuesto por el router.
+1. Sin `GET /job/{id}` — solo callback.  
+2. `BackgroundTasks` ≠ cola distribuida.  
+3. `@lru_cache` en `get_db_engine()` — rotar URL exige redeploy.  
+4. UI estática `/app` puede quedar desalineada del contrato camelCase.
 
 ## Ver también
 
 - [Payload y contratos](payload-y-contratos.md)
-- [Flujo end-to-end](../arquitectura/flujo-end-to-end.md)
 - [Integración n8n](integracion-n8n.md)
+- [Flujo end-to-end](../arquitectura/flujo-end-to-end.md)

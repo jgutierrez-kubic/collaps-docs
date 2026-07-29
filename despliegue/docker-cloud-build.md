@@ -150,4 +150,4 @@ No mezclar: el motor **no** usa este `cloudbuild.yaml` de Kaniko; n8n **no** se 
 
 1. La caché Kaniko (`168h`) acelera rebuilds cuando `package.json` / capas base no cambian.
 2. Si cambias solo TypeScript, asegúrate de regenerar `dist/` **antes** del `gcloud builds submit`.
-3. `WEBHOOK_URL` incorrecta rompe el patrón Wait/resume hacia el motor (`callback_url`).
+3. `WEBHOOK_URL` incorrecta rompe el patrón Wait/resume hacia el motor (`callbackUrl`).

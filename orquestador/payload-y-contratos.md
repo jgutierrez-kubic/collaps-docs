@@ -2,74 +2,89 @@
 
 Contrato HTTP activo del orquestador: modelo Pydantic **`AnalysisPayload`** (`app/models/payload.py`).
 
+## Convención de nombres (Refactor Core)
+
+| Capa | Convención | Ejemplo |
+|---|---|---|
+| Wire HTTP (n8n ↔ Python) | **Inglés + `camelCase`** | `tableA`, `targetTable`, `calculationMethods` |
+| Python interno (atributos) | **Inglés + `snake_case`** | `table_a`, `target_table`, `calculation_methods` |
+
+Pydantic usa `alias_generator=to_camel` con `populate_by_name=True`: acepta camelCase (preferido) y también snake_case por compatibilidad. Las respuestas y callbacks salen en **camelCase**.
+
+> Los nombres españoles antiguos (`tabla_a`, `llave_cruce_a`, `metodos_calculo`, …) **ya no son el contrato oficial**.
+
+---
+
 ## Características del modelo
 
 | Propiedad | Valor |
 |---|---|
-| Config | `strict=True`, `extra="forbid"` |
-| Forma | Objeto JSON **plano** (sin objetos anidados) |
+| Config | `alias_generator=to_camel`, `populate_by_name=True`, `strict=True`, `extra="forbid"` |
+| Forma | Objeto JSON **plano** |
 | Campos desconocidos | Rechazados → `422` |
-| Tipos incorrectos | Rechazados en modo estricto → `422` |
 
 ---
 
-## Esquema de campos
+## Esquema de campos (wire = camelCase)
 
-| Campo | Tipo | Requerido | Default | Descripción |
-|---|---|---|---|---|
-| `source` | `"directus"` \| `"n8n"` | No | `"directus"` | Origen del disparo |
-| `analysis_id` | string \| null | No | `null` | Identificador lógico del análisis |
-| `schema_name` | string | No | `"s00001_incancer"` | Schema PostgreSQL; vacío/`null` → default |
-| `nombre_analisis` | string \| null | No | `null` | Etiqueta humana; se persiste en filas si viene |
-| `tabla_a` | string | **Sí** | — | Tabla origen A (nombre puro o `schema.tabla`) |
-| `tabla_b` | string | **Sí** | — | Tabla origen B |
-| `llave_cruce_a` | string | **Sí** | — | Columna clave en A |
-| `llave_cruce_b` | string | **Sí** | — | Columna clave en B |
-| `columnas_a` | string (CSV) | **Sí** | — | Columnas de análisis en A, separadas por coma |
-| `columnas_b` | string (CSV) | **Sí** | — | Columnas de análisis en B (misma cardinalidad) |
-| `metodos_calculo` | string (CSV) | **Sí** | — | `method_id` o alias legacy por cada par |
-| `tabla_destino` | string | **Sí** | — | Tabla de salida (append) |
-| `callback_url` | string \| null | No | `null` | URL HTTP(S) de notificación al terminar |
+| Campo JSON | Atributo Python | Tipo | Req. | Default | Descripción |
+|---|---|---|---|---|---|
+| `source` | `source` | `"directus"` \| `"n8n"` | No | `"directus"` | Origen del disparo |
+| `analysisId` | `analysis_id` | string \| null | No | `null` | ID lógico del análisis |
+| `schemaName` | `schema_name` | string | No | `"s00001_incancer"` | Schema PostgreSQL |
+| `analysisName` | `analysis_name` | string \| null | No | `null` | Nombre legible; en n8n también genera `targetTable` |
+| `tableA` | `table_a` | string | **Sí** | — | Tabla origen A |
+| `tableB` | `table_b` | string | **Sí** | — | Tabla origen B |
+| `joinKeyA` | `join_key_a` | string | **Sí** | — | Llave de cruce en A |
+| `joinKeyB` | `join_key_b` | string | **Sí** | — | Llave de cruce en B |
+| `columnsA` | `columns_a` | string (CSV) | **Sí** | — | Columnas de análisis en A |
+| `columnsB` | `columns_b` | string (CSV) | **Sí** | — | Columnas de análisis en B |
+| `calculationMethods` | `calculation_methods` | string (CSV) | **Sí** | — | `method_id` o alias legacy por par |
+| `targetTable` | `target_table` | string | **Sí** | — | Tabla destino (append por corrida; ver nomenclatura) |
+| `callbackUrl` | `callback_url` | string \| null | No | `null` | URL HTTP(S) de notificación |
+
+### Mapa de migración (legacy → actual)
+
+| Antiguo (no usar) | Nuevo (wire) |
+|---|---|
+| `tabla_a` / `tabla_b` | `tableA` / `tableB` |
+| `llave_cruce_a` / `llave_cruce_b` | `joinKeyA` / `joinKeyB` |
+| `columnas_a` / `columnas_b` | `columnsA` / `columnsB` |
+| `metodos_calculo` | `calculationMethods` |
+| `tabla_destino` | `targetTable` |
+| `nombre_analisis` | `analysisName` |
+| `callback_url` | `callbackUrl` |
+| `analysis_id` | `analysisId` |
+| `schema_name` | `schemaName` |
 
 ### Ejemplo mínimo válido
 
 ```json
 {
   "source": "n8n",
-  "analysis_id": "n8n_1722096123456",
-  "schema_name": "s00001_incancer",
-  "nombre_analisis": "Cruce cantidades vs contrato",
-  "tabla_a": "modelo",
-  "tabla_b": "contrato",
-  "llave_cruce_a": "codigo",
-  "llave_cruce_b": "codigo",
-  "columnas_a": "cantidad,precio",
-  "columnas_b": "cantidad,precio",
-  "metodos_calculo": "math_sub,strict_equal",
-  "tabla_destino": "c_resultado_cruce",
-  "callback_url": "https://n8n.example.com/webhook-waiting/abc123"
+  "analysisId": "n8n_1722096123456",
+  "schemaName": "s00001_incancer",
+  "analysisName": "Precio Frutas",
+  "tableA": "modelo",
+  "tableB": "contrato",
+  "joinKeyA": "codigo",
+  "joinKeyB": "codigo",
+  "columnsA": "cantidad,precio",
+  "columnsB": "cantidad,precio",
+  "calculationMethods": "math_sub,strict_equal",
+  "targetTable": "c_results_precioFrutas",
+  "callbackUrl": "https://n8n.example.com/webhook-waiting/abc123"
 }
 ```
 
-### Ejemplo con tablas calificadas
+### Nomenclatura de `targetTable`
 
-El cliente puede enviar `schema.tabla`; el validador **elimina el prefijo** y conserva solo el identificador de tabla. El schema efectivo sigue siendo `schema_name`.
+| Origen | Convención |
+|---|---|
+| Nodo Condenser (n8n) | Auto: `c_results_` + camelCase del `analysisName` (vía `tableNameFormatter`) |
+| Directus / cliente manual | Debe enviar un identificador SQL válido; se recomienda el mismo prefijo `c_results_*` |
 
-```json
-{
-  "schema_name": "s00001_incancer",
-  "tabla_a": "s00001_incancer.modelo",
-  "tabla_b": "s00001_incancer.contrato",
-  "tabla_destino": "s00001_incancer.c_resultado_cruce",
-  "llave_cruce_a": "codigo",
-  "llave_cruce_b": "codigo",
-  "columnas_a": "cantidad",
-  "columnas_b": "cantidad",
-  "metodos_calculo": "DIFERENCIA"
-}
-```
-
-Tras sanitizar: `tabla_a = "modelo"`, `tabla_b = "contrato"`, `tabla_destino = "c_resultado_cruce"`.
+Ejemplo: Analysis Name `Precio Frutas` → `targetTable: "c_results_precioFrutas"`.
 
 ---
 
@@ -77,57 +92,14 @@ Tras sanitizar: `tabla_a = "modelo"`, `tabla_b = "contrato"`, `tabla_destino = "
 
 | Validador | Campos | Regla |
 |---|---|---|
-| `normalize_schema_name` | `schema_name` | `None` o blank → `"s00001_incancer"` |
-| `validate_schema_name` | `schema_name` | Regex `^[a-zA-Z_][a-zA-Z0-9_]*$` |
-| `sanitize_qualified_table_names` | `tabla_a`, `tabla_b`, `tabla_destino` | Quita `schema.`; valida identificador |
-| `validate_join_keys` | `llave_cruce_a`, `llave_cruce_b` | Identificador SQL seguro |
-| `validate_column_lists` | `columnas_a`, `columnas_b` | CSV no vacío; cada ítem es identificador |
-| `validate_methods` | `metodos_calculo` | Cada ítem ∈ `OPERATIONS_REGISTRY` (lowercase) o `{DIFERENCIA, IGUALDAD}` |
+| `normalize_schema_name` | `schema_name` | `None`/blank → default |
+| `validate_schema_name` | `schema_name` | Identificador SQL |
+| `sanitize_qualified_table_names` | `table_a`, `table_b`, `target_table` | Quita `schema.`; valida identificador |
+| `validate_join_keys` | `join_key_a`, `join_key_b` | Identificador SQL |
+| `validate_column_lists` | `columns_a`, `columns_b` | CSV no vacío de identificadores |
+| `validate_methods` | `calculation_methods` | Cada ítem ∈ registry o `{DIFERENCIA, IGUALDAD}` |
 
-### Cardinalidad de listas CSV
-
-Aunque Pydantic no impone la igualdad de longitudes en el modelo, **`AnalysisEngine` / `build_analysis_sql` exigen** que:
-
-```text
-len(columnas_a) == len(columnas_b) == len(metodos_calculo)
-```
-
-tras el split por comas. Un desajuste provoca error en background (no en la validación 422 del endpoint, salvo que un método individual sea inválido).
-
-En n8n, `CollapsMethodConfigurator` sí valida esa igualdad antes del POST.
-
----
-
-## Métodos permitidos en `metodos_calculo`
-
-### Alias legacy
-
-| Alias | Resolución en engine |
-|---|---|
-| `DIFERENCIA` | `math_sub` con operandos invertidos (`val_b - val_a`) |
-| `IGUALDAD` | `strict_equal` |
-
-### method_id canónicos (nodos n8n)
-
-| Categoría | IDs |
-|---|---|
-| Math | `math_add`, `math_sub`, `math_diff_abs`, `math_diff_pct`, `math_tolerance`, `math_ratio` |
-| Text | `strict_equal`, `normalized_equal`, `fuzzy_levenshtein`, `fuzzy_jaro_winkler`, `contains_check`, `regex_match` |
-| Date | `date_diff_seconds`, `date_diff_days`, `date_equal`, `date_tolerance` |
-| Array | `array_intersection`, `array_difference`, `array_jaccard` |
-| Logic | `null_check`, `boolean_logic` |
-
-> El detalle semántico de cada método se documentará en la sección **Motor matemático**. Aquí solo importa el contrato de nombres aceptados.
-
----
-
-## Helpers de calificación (no son campos JSON)
-
-```python
-payload.qualified_table_a()   # "{schema_name}.{tabla_a}"
-payload.qualified_table_b()   # "{schema_name}.{tabla_b}"
-payload.qualified_destino()   # "{schema_name}.{tabla_destino}"
-```
+**Cardinalidad:** `len(columnsA) == len(columnsB) == len(calculationMethods)` (exigido al construir el SQL / en n8n Method Configurator).
 
 ---
 
@@ -138,76 +110,73 @@ payload.qualified_destino()   # "{schema_name}.{tabla_destino}"
 ```json
 {
   "status": "accepted",
-  "job_id": "<uuid4>",
-  "analysis_id": "<string|null>",
-  "message": "Análisis encolado exitosamente"
+  "jobId": "<uuid4>",
+  "analysisId": "<string|null>",
+  "message": "Analysis job queued successfully"
 }
 ```
 
-### Callback asíncrono (POST a `callback_url`)
+### Callback asíncrono (POST a `callbackUrl`)
 
 ```json
 {
   "status": "success",
-  "analysis_id": "n8n_1722096123456",
+  "analysisId": "n8n_1722096123456",
   "schema": "s00001_incancer",
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
   "summary": {
-    "total_rows": 120,
+    "totalRows": 120,
     "matches": 100,
-    "only_a": 12,
-    "only_b": 8,
-    "has_duplicates": false
+    "onlyA": 12,
+    "onlyB": 8,
+    "hasDuplicates": false
   }
 }
 ```
 
-| Campo `summary` | Significado |
+| Campo | Notas |
 |---|---|
-| `total_rows` | Filas del DataFrame de cruce |
-| `matches` | Filas con `estado_cruce = Match` |
-| `only_a` / `only_b` | Filas solo en un lado del JOIN |
-| `has_duplicates` | Indica si el total de filas sugiere llaves no únicas |
-
-### Error de validación (`422`)
-
-Formato estándar FastAPI:
-
-```json
-{
-  "detail": [
-    {
-      "type": "...",
-      "loc": ["body", "metodos_calculo"],
-      "msg": "Métodos no soportados: foo. Use un method_id de collaps_engine o alias legacy DIFERENCIA/IGUALDAD.",
-      "input": "..."
-    }
-  ]
-}
-```
+| `jobId` | UUID del encolado HTTP (distinto del `run_id` entero en BD) |
+| `summary.*` | Acumulado sobre todos los chunks del job |
 
 ---
 
-## Columnas persistidas (contrato de salida en BD)
+## Columnas persistidas en la tabla destino
 
-Además de las columnas del JOIN y de resultado (`{col}__{method}`, `is_match__...`), el engine añade:
+### Pares indexados (datos)
 
-| Columna | Origen |
+Por cada par `(columnsA[i], columnsB[i], calculationMethods[i])`:
+
+| Columna | Ejemplo | Significado |
+|---|---|---|
+| `{i}_{col}A` | `0_cantidadA` | Valor origen A del par |
+| `{i}_{col}B` | `0_cantidadB` | Valor origen B del par |
+| `{i}_metodo_aplicado` | `0_metodo_aplicado` | Texto del método pedido |
+| `{i}_{method}` | `0_math_sub` o `0_diferencia` | Resultado del cálculo |
+| `{i}_is_match` | `0_is_match` | Match inferido (si aplica y no es boolean-pure) |
+
+Las columnas SQL intermedias `{col}_a` / `{col}_b` se eliminan tras materializar el bloque indexado.
+
+### Metadatos (siempre al final, derecha)
+
+Orden fijo:
+
+`run_id`, `created_at`, `timestamp`, `job_id`, `estado_cruce`, `analysis_id`, `analysis_name`, `source`
+
+| Campo | Tipo / notas |
 |---|---|
-| `run_id` | UUID de la ejecución |
-| `created_at` | Timestamp UTC |
-| `analysis_id` | Si venía en el payload |
-| `nombre_analisis` | Si venía en el payload |
-| `source` | Valor del payload |
-| `id` | `SERIAL PRIMARY KEY` (si no existía) |
+| `run_id` | **Entero incremental** por tabla (`MAX(run_id)+1`), único por job, compartido entre chunks |
+| `job_id` | UUID del encolado HTTP |
+| `estado_cruce` | `Match` \| `Only A` \| `Only B` |
+| `timestamp` / `created_at` | Marca UTC de la corrida |
+
+También se asegura `id SERIAL PRIMARY KEY` para Directus.
 
 ---
 
-## Formatos que **no** son el contrato activo
+## Contrato WorkTables (relacionado)
 
-| Formato | Estado |
-|---|---|
-| `JobPayload` / módulos `module_00_on`… | Legacy en `bttf_engine.py`; **no** expuesto |
-| `column_comparisons[]` (`dynamoMatching.ts`) | Helper interno n8n; el POST real usa CSV plano |
+Endpoint aparte: `POST /api/v1/worktables/create` — ver [WorkTables](worktables.md).
 
 ## Ver también
 

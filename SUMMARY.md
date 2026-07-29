@@ -13,6 +13,7 @@
 * [FastAPI / AnalysisEngine](orquestador/fastapi-analysisengine.md)
 * [Payload y contratos](orquestador/payload-y-contratos.md)
 * [Integración n8n](orquestador/integracion-n8n.md)
+* [WorkTables](orquestador/worktables.md)
 
 ## Motor matemático
 

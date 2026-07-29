@@ -2,58 +2,56 @@
 
 ## Qué es COLLAPS
 
-**COLLAPS** (suite *Collaps BIM-OS*) es un sistema de análisis de cruce de datos tabulares orientado a operaciones BIM / back-office. Compara dos tablas PostgreSQL bajo una misma clave de cruce, aplica un catálogo de métodos matemáticos y lógicos fila a fila, persiste el resultado y lo registra automáticamente en Directus para consumo operativo.
+**COLLAPS** (suite *Collaps BIM-OS*) cruza dos tablas PostgreSQL, aplica un catálogo de métodos matemáticos/lógicos y materializa resultados consumibles desde Directus. Opcionalmente genera **tablas de trabajo** (`w_table_*`) agrupadas.
 
-El servicio HTTP del motor se publica como **Condenser CORE** (`collaps-C`): FastAPI asíncrono desplegado en Google Cloud Run. La construcción del payload y el disparo del análisis se orquestan desde **n8n** mediante el paquete de nodos custom `n8n-nodes-collaps` (`collaps-n8n-nodes`).
+El backend **Condenser CORE** (`collaps-C`) expone FastAPI en Cloud Run. n8n (`collaps-n8n-nodes`) construye el payload y dispara los jobs.
 
 ## Propósito
 
 | Objetivo | Cómo lo resuelve |
 |---|---|
-| Cruzar dos fuentes tabulares | `FULL OUTER JOIN` en PostgreSQL sobre `llave_cruce_a` / `llave_cruce_b` |
-| Aplicar lógica de comparación reutilizable | `collaps_engine.execute_transformation` por par de columnas y método |
-| No bloquear el flujo de n8n | Endpoint `202 Accepted` + `BackgroundTasks` + callback opcional a `$execution.resumeUrl` |
-| Exponer resultados al portal | Append a tabla destino + auto-registro de colección en Directus |
-| Evolucionar el esquema de salida | Migración automática de columnas (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`) |
+| Cruzar dos fuentes | `FULL OUTER JOIN` por `joinKeyA` / `joinKeyB` |
+| Comparar columnas | `collaps_engine` vía `calculationMethods` |
+| No bloquear n8n | `202` + `BackgroundTasks` + `callbackUrl` |
+| Escalar sin OOM | Lectura en chunks de 50.000 filas + `df.apply` |
+| Nombrar resultados | `c_results_<camelCase>` (cruces) / `w_table_<camelCase>` (worktables) |
+| Contrato estable | HTTP 100% inglés + **camelCase** |
 
-## Alcance de la suite (repositorios)
+## Repositorios
 
-| Repositorio | Rol | Stack |
-|---|---|---|
-| `collaps-C` | Orquestador HTTP + motor matemático (`collaps_engine`) + persistencia | Python 3.10, FastAPI, SQLAlchemy, Pandas |
-| `collaps-n8n-nodes` | Nodos n8n que descubren esquema/tablas/columnas, arman el payload y llaman al engine | TypeScript, n8n-workflow, `pg` |
-| `collaps-docs` | Documentación de arquitectura (GitBook) | Markdown |
+| Carpeta | Rol |
+|---|---|
+| `collaps-C` | Orquestador + motor + worktables |
+| `collaps-n8n-nodes` | Nodos Condenser + WorkTableGenerator |
+| `collaps-docs` | GitBook |
 
 ## Flujo conceptual
 
 ```text
-n8n (nodos Collaps*)
-  → POST JSON AnalysisPayload
-    → Cloud Run / FastAPI  POST /api/v1/condenser/job  → 202 Accepted
-      → AnalysisEngine (background)
-        → PostgreSQL FULL OUTER JOIN
-        → collaps_engine (por fila / par de columnas)
-        → append + auto-migración + PK para Directus
-        → Directus POST /collections (idempotente)
-        → callback HTTP opcional a n8n
+n8n (Mapper → Methods → BttfTrigger)
+  → POST camelCase AnalysisPayload
+    → /api/v1/condenser/job → 202 { jobId }
+      → AnalysisEngine (chunks 50k)
+        → columnas indexadas + run_id int
+        → Directus + callback camelCase
+
+n8n (WorkTableGenerator)  [opcional / paralelo]
+  → POST /api/v1/worktables/create → 202
+      → WorktableEngine → w_table_*
 ```
 
 ## Principios de diseño
 
-1. **Contrato plano y estricto.** El payload activo (`AnalysisPayload`) es un objeto JSON plano validado con Pydantic (`strict=True`, `extra="forbid"`). No admite campos desconocidos.
-2. **Append-only.** La tabla destino nunca se reemplaza: cada ejecución añade filas con metadatos de corrida (`run_id`, `created_at`, etc.).
-3. **Asincronía fire-and-forget.** El cliente recibe `job_id` de inmediato; el único canal de finalización hacia n8n es `callback_url` (si se envía).
-4. **Separación de responsabilidades.** n8n construye y dispara; FastAPI orquesta; `collaps_engine` calcula; PostgreSQL almacena; Directus publica la colección.
-
-## Fuera de alcance (Sprint 1)
-
-- Detalle del catálogo `OPERATIONS_REGISTRY` y firma de cada método → sección **Motor matemático** (pendiente).
-- Dockerfile, Cloud Build, secretos y variables de entorno de producción → sección **Despliegue** (pendiente).
+1. **Wire en inglés camelCase**; Python interno en snake_case.  
+2. **Append por corrida** con `run_id` incremental entero (no UUID).  
+3. **Fire-and-forget** con callback opcional.  
+4. **Nombres de tabla generados** desde nombres amigables (`tableNameFormatter`).
 
 ## Lectura recomendada
 
 | Documento | Contenido |
 |---|---|
-| [Componentes y límites](componentes-y-limites.md) | Límites de cada pieza del sistema |
-| [Flujo end-to-end](flujo-end-to-end.md) | Ciclo de vida completo de una petición |
-| [Payload y contratos](../orquestador/payload-y-contratos.md) | Esquema exacto de `AnalysisPayload` |
+| [Componentes y límites](componentes-y-limites.md) | Quién hace qué |
+| [Flujo end-to-end](flujo-end-to-end.md) | Ciclo de vida |
+| [Payload y contratos](../orquestador/payload-y-contratos.md) | JSON oficial |
+| [Guía Directus](../guias-practicas/directus-end-to-end.md) | Uso sin programar |
