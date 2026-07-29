@@ -132,7 +132,22 @@ Ambos nodos HTTP (`BttfTrigger`, `WorkTableGenerator`) evalúan:
 context.evaluateExpression('{{ $execution.resumeUrl }}', 0)
 ```
 
-Si hay URL, se envía como `callbackUrl`. El motor Condenser responde al terminar con summary camelCase (`totalRows`, `onlyA`, …).
+Si hay URL, se envía como `callbackUrl`. El motor responde al terminar con summary camelCase (`totalRows`, `onlyA`, …) — **sin** tocar Directus/NocoDB.
+
+---
+
+## Sync de visores (después del callback)
+
+Encadena el sub-workflow `sync-visores-nocodb-directus.json`:
+
+```text
+Wait (callback success) → Execute Workflow → Sync Visores
+  ├─ NocoDB meta-diff   (timeout 120s, 3 retries)
+  └─ Directus schema/diff (paralelo, mismos timeouts)
+```
+
+Documentación completa: [Sync de visores](sync-visores.md).  
+Exposición PostgreSQL hacia NocoDB: [NocoDB](../infraestructura/nocodb.md).
 
 ---
 
@@ -145,4 +160,5 @@ En el wire final viajan dentro de `calculationMethods` (no `metodos_calculo`).
 
 - [Payload y contratos](payload-y-contratos.md)
 - [WorkTables](worktables.md)
+- [Sync de visores](sync-visores.md)
 - [Flujo end-to-end](../arquitectura/flujo-end-to-end.md)

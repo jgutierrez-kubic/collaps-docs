@@ -1,111 +1,72 @@
 # Flujo end-to-end
 
-Ciclo de vida de un análisis COLLAPS tras el Refactor Core: contrato camelCase, chunks anti-OOM, columnas indexadas y `run_id` incremental.
+Ciclo de vida completo: motor desacoplado de CMS + sync de visores en n8n.
 
-## Diagrama de secuencia (Condenser)
+## Diagrama de secuencia
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant Ops as Operador / n8n
   participant Trig as CollapsBttfTrigger
-  participant API as FastAPI POST /condenser/job
+  participant API as bttf-engine
   participant AE as AnalysisEngine
   participant PG as PostgreSQL
-  participant CE as collaps_engine
-  participant DX as Directus
   participant Wait as resumeUrl
+  participant Sync as Sync Visores
+  participant NC as NocoDB
+  participant DX as Directus
 
   Ops->>Trig: Analysis Name + estructura + métodos
-  Trig->>Trig: targetTable = c_results_camelCase
-  Trig->>API: AnalysisPayload camelCase
-  API-->>Trig: 202 { jobId, analysisId }
-  API->>AE: BackgroundTasks.run(jobId)
+  Trig->>API: POST /condenser/job (camelCase)
+  API-->>Trig: 202 { jobId }
+  API->>AE: BackgroundTasks
 
-  AE->>PG: Stats unicidad + SQL JOIN
-  loop Chunks de 50.000 filas
-    AE->>PG: read_sql chunk
-    AE->>CE: df.apply execute_transformation
-    AE->>AE: columnas {i}_colA / {i}_método
-    AE->>PG: replace|append + run_id compartido
-    AE->>AE: acumular summary camelCase
+  loop Chunks 50.000 filas
+    AE->>PG: read / transform / replace|append
   end
 
-  AE->>DX: POST /collections (idempotente)
-  opt callbackUrl
-    AE->>Wait: POST { status, jobId, summary.totalRows, ... }
+  AE->>Wait: POST callback { status: "success", jobId, summary }
+  Wait->>Sync: Execute Workflow
+  par Meta Sync
+    Sync->>NC: POST meta-diff (timeout 120s, 3 retries)
+    Sync->>DX: POST schema/diff (timeout 120s, 3 retries)
   end
 ```
 
-## Fase 1 — Construcción en n8n
+## Fase 1 — n8n arma y dispara
 
-1. DbConnection → Schema → Tables → Columns (× lados A/B).  
-2. KeyColumnMapper → MethodConfigurator.  
-3. **CollapsBttfTrigger**: solo pide *Analysis Name*; genera `targetTable` y `callbackUrl`.  
-4. Opcional en paralelo: **CollapsWorkTableGenerator** → `/worktables/create`.
+Mapper → Methods → **CollapsBttfTrigger** (auto `c_results_*` + `callbackUrl`).  
+Opcional: **WorkTableGenerator** → `/worktables/create`.
 
-Detalle: [Integración n8n](../orquestador/integracion-n8n.md).
+## Fase 2 — Motor (solo datos)
 
-## Fase 2 — Aceptación (`202`)
+1. `202 Accepted` inmediato.  
+2. Chunks de 50k, `run_id` entero, columnas indexadas.  
+3. Persistencia PostgreSQL.  
+4. **No** hay llamadas a Directus/NocoDB.  
+5. Callback HTTP a n8n.
 
-```http
-POST /api/v1/condenser/job
-Content-Type: application/json
-```
+## Fase 3 — Sync de visores (n8n)
 
-```json
-{
-  "status": "accepted",
-  "jobId": "550e8400-e29b-41d4-a716-446655440000",
-  "analysisId": "n8n_1722096123456",
-  "message": "Analysis job queued successfully"
-}
-```
+Tras el webhook de éxito, el flujo principal invoca `sync-visores-nocodb-directus.json`:
 
-Payload inválido → `422` (no se encola).
+- NocoDB y Directus en **paralelo**  
+- Timeout **120.000 ms**  
+- Retry On Fail: **3 intentos**  
 
-## Fase 3 — Ejecución chunked
+Ver [Sync de visores](../orquestador/sync-visores.md) y [NocoDB](../infraestructura/nocodb.md).
 
-| Aspecto | Comportamiento |
-|---|---|
-| Lectura | `chunksize=50000` |
-| Transform | `df.apply(axis=1)` por par de columnas |
-| Columnas resultado | Bloques indexados `0_*`, `1_*`, … |
-| Metadatos | Al final: `run_id`, `created_at`, `timestamp`, `job_id`, `estado_cruce`, … |
-| `run_id` | Entero `MAX+1`, **una vez por job**, mismo valor en todos los chunks |
-| Persistencia | `replace` solo primer chunk si la tabla es nueva; luego `append` |
-| Summary | Acumulado dinámico para el webhook |
-
-## Fase 4 — Observabilidad
+## Observabilidad
 
 | Artefacto | Dónde |
 |---|---|
-| Filas | `schema.targetTable` (p. ej. `c_results_precioFrutas`) |
-| Colección UI | Directus (si hay credenciales en `portal_projects`) |
-| Señal n8n | Callback camelCase a `callbackUrl` |
-| Logs | Cloud Run / Uvicorn |
-
-## WorkTables (flujo hermano)
-
-```text
-CollapsWorkTableGenerator
-  → POST /api/v1/worktables/create
-    → 202 { jobId, targetTable }
-      → WorktableEngine (GROUP BY / ORDER BY → w_table_*)
-```
-
-Ver [WorkTables](../orquestador/worktables.md).
-
-## Casos de borde
-
-| Situación | Comportamiento |
-|---|---|
-| Payload con campos españoles antiguos | No es el contrato oficial; el Trigger n8n ya traduce |
-| Llaves no únicas | Warning + posible multiplicación de filas |
-| Engine reiniciado mid-job | Chunks en curso se pierden (sin cola durable) |
-| Sin `callbackUrl` | Solo logs + tabla destino |
+| Filas de resultado | PostgreSQL (`c_results_*` / `w_table_*`) |
+| Señal de fin | Callback camelCase a n8n |
+| Catálogo UI | NocoDB / Directus **después** del Meta Sync |
 
 ## Referencias
 
-- [Payload y contratos](../orquestador/payload-y-contratos.md)
-- [FastAPI / AnalysisEngine](../orquestador/fastapi-analysisengine.md)
+- [FastAPI / AnalysisEngine](../orquestador/fastapi-analysisengine.md)  
+- [Payload y contratos](../orquestador/payload-y-contratos.md)  
+- [Integración n8n](../orquestador/integracion-n8n.md)

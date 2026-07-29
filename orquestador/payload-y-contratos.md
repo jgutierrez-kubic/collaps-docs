@@ -82,7 +82,7 @@ Pydantic usa `alias_generator=to_camel` con `populate_by_name=True`: acepta came
 | Origen | Convención |
 |---|---|
 | Nodo Condenser (n8n) | Auto: `c_results_` + camelCase del `analysisName` (vía `tableNameFormatter`) |
-| Directus / cliente manual | Debe enviar un identificador SQL válido; se recomienda el mismo prefijo `c_results_*` |
+| Cliente manual / Flow Directus | Debe enviar un identificador SQL válido; se recomienda el mismo prefijo `c_results_*` |
 
 Ejemplo: Analysis Name `Precio Frutas` → `targetTable: "c_results_precioFrutas"`.
 
@@ -170,7 +170,7 @@ Orden fijo:
 | `estado_cruce` | `Match` \| `Only A` \| `Only B` |
 | `timestamp` / `created_at` | Marca UTC de la corrida |
 
-También se asegura `id SERIAL PRIMARY KEY` para Directus.
+El motor **no** registra la tabla en Directus/NocoDB; el refresh de visores lo hace n8n ([Sync de visores](sync-visores.md)).
 
 ---
 

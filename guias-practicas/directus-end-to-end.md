@@ -16,9 +16,13 @@ Manual para configurar un cruce COLLAPS desde la colección **C Master Analisis*
 flowchart LR
   A[C Master Analisis] --> B[Webhook / Flow]
   B --> C[Motor camelCase]
-  C --> D[Chunks + cálculos]
-  D --> E[c_results_* en Directus]
+  C --> D[Chunks + PostgreSQL]
+  D --> E[Callback n8n]
+  E --> F[Sync Visores]
+  F --> G[Directus / NocoDB UI]
 ```
+
+> El motor **ya no** registra colecciones en Directus. Tras el callback de éxito, n8n debe ejecutar el sub-workflow [Sync de visores](../orquestador/sync-visores.md) para que la tabla aparezca en la UI.
 
 ---
 
@@ -105,7 +109,8 @@ Payload resultante (simplificado):
 1. El motor responde `202` con `jobId` (no esperes el resultado en esa respuesta).  
 2. Procesa el cruce en **bloques de 50.000 filas** (no carga toda la tabla en RAM).  
 3. Asigna un `run_id` **entero** (1, 2, 3…) a toda la corrida.  
-4. Añade filas a `targetTable` y, si puede, registra la colección en Directus.
+4. Añade filas a `targetTable` en PostgreSQL y notifica a n8n (`status: success`).  
+5. n8n lanza el **Sync de visores** (NocoDB ∥ Directus) para refrescar el catálogo UI.
 
 ---
 
@@ -154,7 +159,7 @@ Siempre al final:
 | `422` del API | Campos camelCase, métodos válidos, CSVs alineados |
 | Signo “al revés” | `DIFERENCIA` (B−A) vs `math_sub` (A−B) |
 | Muchas filas | Llave de cruce no única |
-| No veo colección | Primera vez / credenciales Directus; la tabla puede existir igual en PG |
+| No veo la tabla en Directus/NocoDB | ¿Corrió el Sync de visores tras el callback? ¿`nocodb_light` tiene privilegios? La tabla puede existir ya en PG |
 
 ## Checklist
 
@@ -167,5 +172,7 @@ Siempre al final:
 ## Siguiente lectura
 
 - [Payload y contratos](../orquestador/payload-y-contratos.md)  
+- [Sync de visores](../orquestador/sync-visores.md)  
+- [NocoDB — despliegue](../infraestructura/nocodb.md)  
 - [Motor matemático](../motor-matematico/conceptos-base.md)  
-- [WorkTables](../orquestador/worktables.md) (tablas `w_table_*`)
+- [WorkTables](../orquestador/worktables.md)

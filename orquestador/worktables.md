@@ -76,7 +76,7 @@ sequenceDiagram
   participant API as POST /worktables/create
   participant WT as WorktableEngine
   participant PG as PostgreSQL
-  participant DX as Directus
+  participant Sync as Sync Visores n8n
 
   N8N->>API: WorktableCreatePayload (camelCase)
   API-->>N8N: 202 { jobId, targetTable }
@@ -84,7 +84,8 @@ sequenceDiagram
   WT->>PG: SELECT ... GROUP BY ... ORDER BY ...
   WT->>WT: run_id incremental + metadatos
   WT->>PG: persist target table
-  WT->>DX: POST /collections (si hay credenciales)
+  Note over WT,Sync: Sin llamadas a Directus/NocoDB desde Python
+  N8N->>Sync: Tras callback — Meta Sync en n8n
 ```
 
 Estado actual del motor (`WorktableEngine`):
@@ -95,6 +96,7 @@ Estado actual del motor (`WorktableEngine`):
 | Encolado 202 + BackgroundTasks | ✅ |
 | Query GROUP BY / ORDER BY | Esqueleto (SQL seguro pendiente de endurecer) |
 | `run_id` incremental + metadatos al final | ✅ patrón compartido con AnalysisEngine |
+| Registro CMS (Directus/NocoDB) | ❌ fuera del motor — [Sync de visores](sync-visores.md) |
 | Callback al `callbackUrl` | ⏳ TODO en código |
 | Agregaciones SUM/COUNT/AVG | ⏳ TODO de negocio |
 

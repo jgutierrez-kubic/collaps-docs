@@ -14,6 +14,7 @@
 * [Payload y contratos](orquestador/payload-y-contratos.md)
 * [Integración n8n](orquestador/integracion-n8n.md)
 * [WorkTables](orquestador/worktables.md)
+* [Sync de visores](orquestador/sync-visores.md)
 
 ## Motor matemático
 
@@ -28,6 +29,10 @@
 ## Guías Prácticas y Ejemplos
 
 * [Directus end-to-end](guias-practicas/directus-end-to-end.md)
+
+## Infraestructura
+
+* [NocoDB — Despliegue y mantención](infraestructura/nocodb.md)
 
 ## Despliegue
 

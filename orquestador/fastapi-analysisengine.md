@@ -1,33 +1,28 @@
 # FastAPI / AnalysisEngine
 
-Orquestador HTTP **Condenser CORE** y motor de jobs `AnalysisEngine` tras el Refactor Core.
+Orquestador HTTP **bttf-engine** tras el desacoplamiento de CMS.
 
 ## Servicio
 
 | Atributo | Valor |
 |---|---|
-| Título OpenAPI | `Condenser CORE` |
-| Versión | `0.1.0` |
+| Título | `Condenser CORE` |
 | Routers | `/api/v1/condenser` + `/api/v1/worktables` |
-| UI estática | `/app` |
+| Salida HTTP del job | Solo `callbackUrl` → n8n |
 
-```python
-app.include_router(condenser_router)   # /api/v1/condenser
-app.include_router(worktable_router)   # /api/v1/worktables
-```
+**Ya no** existen métodos de auto-registro Directus/NocoDB ni variables `DIRECTUS_*` en el motor.
 
 ---
 
-## Endpoint principal: `POST /api/v1/condenser/job`
+## `POST /api/v1/condenser/job`
 
 | Propiedad | Valor |
 |---|---|
-| Handler | `create_analysis_job` |
-| Body | `AnalysisPayload` (JSON **camelCase**) |
+| Body | `AnalysisPayload` (camelCase) |
 | Éxito | `202 Accepted` |
-| Validación | `422` |
+| Background | `AnalysisEngine.run(job_id)` |
 
-### Respuesta `202` (camelCase)
+### Respuesta `202`
 
 ```json
 {
@@ -38,60 +33,27 @@ app.include_router(worktable_router)   # /api/v1/worktables
 }
 ```
 
-```python
-background_tasks.add_task(engine.run, job_id)
-```
-
-El trabajo pesado corre en `BackgroundTasks` del mismo proceso (no es una cola durable).
-
 ---
 
-## Asincronía y rendimiento (Anti-OOM)
+## Responsabilidad del motor (100% datos)
 
 ```mermaid
 flowchart TD
-  A[POST /job → 202] --> B[BackgroundTasks: engine.run]
-  B --> C[SQL FULL OUTER JOIN en chunks de 50.000]
-  C --> D[Transformaciones con df.apply axis=1]
-  D --> E{¿Primer chunk y tabla nueva?}
-  E -->|sí| F[to_sql if_exists=replace]
-  E -->|no| G[to_sql if_exists=append]
-  F --> H[Acumular summary]
-  G --> H
-  H --> I{¿Más chunks?}
-  I -->|sí| C
-  I -->|no| J[Directus + callback camelCase]
+  A[POST /job → 202] --> B[chunks 50.000]
+  B --> C[df.apply transformaciones]
+  C --> D[run_id incremental]
+  D --> E[PostgreSQL replace/append]
+  E --> F[callback n8n status success]
+  F -.-> G[Sync Visores — fuera del motor]
 ```
 
-| Mejora | Detalle |
+| Capacidad | Estado |
 |---|---|
-| Chunking | `SQL_CHUNK_SIZE = 50_000` vía `pd.read_sql(..., chunksize=...)` |
-| Persistencia | Primer chunk en tabla nueva → `replace`; resto → `append` |
-| Vectorización | `df.apply(..., axis=1)` — **sin** `iterrows()` |
-| Summary | Se acumula chunk a chunk (`totalRows`, `matches`, `onlyA`, `onlyB`) |
-| `run_id` | Entero `MAX(run_id)+1`, calculado **una vez** por job y reutilizado en todos los chunks |
-
----
-
-## Ciclo interno de `AnalysisEngine.run`
-
-| Paso | Acción |
-|---|---|
-| 1 | Asigna `job_id` (UUID) y timestamp UTC |
-| 2 | `build_analysis_sql` → FULL OUTER JOIN |
-| 3 | Stats de unicidad de llaves (warning si no son únicas) |
-| 4 | Itera chunks de 50k filas |
-| 5 | Por chunk: `df.apply` + columnas indexadas `{i}_colA` / `{i}_método` |
-| 6 | Reordena metadatos al final; persiste; acumula summary |
-| 7 | Auto-registro Directus (idempotente) |
-| 8 | Callback HTTP a `callbackUrl` |
-
-### `jobId` vs `run_id`
-
-| ID | Tipo | Rol |
-|---|---|---|
-| `jobId` | UUID string | Encolado HTTP + campo `job_id` en filas + callback |
-| `run_id` | int incremental | Corrida de negocio por tabla destino; compartido entre chunks |
+| Chunking 50k anti-OOM | ✅ |
+| `run_id` int por job | ✅ |
+| Columnas indexadas + metadatos al final | ✅ |
+| Callback camelCase | ✅ |
+| Registro Directus / NocoDB | ❌ eliminado |
 
 ### Callback
 
@@ -111,37 +73,27 @@ flowchart TD
 }
 ```
 
----
-
-## Endpoint auxiliar: `POST /api/v1/condenser/upload`
-
-Multipart → GCS (o fallback local). Sin cambios de contrato camelCase en el body form.
+Tras recibirlo, n8n debe encadenar el [Sync de visores](sync-visores.md) si las UIs deben refrescarse.
 
 ---
 
-## Endpoint hermano: WorkTables
+## WorkTables
 
-`POST /api/v1/worktables/create` — materializa tablas de trabajo agrupadas. Ver [WorkTables](worktables.md).
-
----
+`POST /api/v1/worktables/create` — misma filosofía: Postgres + callback; sin CMS.  
+Ver [WorkTables](worktables.md).
 
 ## Configuración
 
-| Variable | Obligatoria para `/job` | Rol |
+| Variable | Obligatoria | Rol |
 |---|---|---|
-| `DATABASE_URL` | Sí | Engine SQLAlchemy |
-| `GCS_BUCKET_NAME` | No | Solo `/upload` |
-| `PORT` | No | Default `8080` |
+| `DATABASE_URL` | Sí | PostgreSQL |
+| `GCS_BUCKET_NAME` | No | `/upload` |
+| `PORT` | No | Default 8080 |
 
-## Límites
-
-1. Sin `GET /job/{id}` — solo callback.  
-2. `BackgroundTasks` ≠ cola distribuida.  
-3. `@lru_cache` en `get_db_engine()` — rotar URL exige redeploy.  
-4. UI estática `/app` puede quedar desalineada del contrato camelCase.
+No se configuran URLs ni tokens de Directus/NocoDB en este servicio.
 
 ## Ver también
 
-- [Payload y contratos](payload-y-contratos.md)
-- [Integración n8n](integracion-n8n.md)
-- [Flujo end-to-end](../arquitectura/flujo-end-to-end.md)
+- [Payload y contratos](payload-y-contratos.md)  
+- [Sync de visores](sync-visores.md)  
+- [NocoDB](../infraestructura/nocodb.md)
