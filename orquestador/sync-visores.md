@@ -74,16 +74,31 @@ Los visores viven en Cloud Run con `min-instances=0` (ver [NocoDB](../infraestru
 
 ## Dónde encaja en el pipeline COLLAPS
 
-Orden conceptual recomendado:
+### Guardia de tráfico (`updateSchema`)
+
+n8n **no** llama siempre al Meta Sync. Tras el callback del motor:
 
 ```text
 1. CollapsBttfTrigger / WorkTableGenerator
-2. Wait (resumeUrl) ← callback del motor { status: "success", ... }
-3. Execute Workflow → Sync Visores (NocoDB / Directus)
-4. (Opcional) notificar al usuario / continuar UI
+2. Wait (resumeUrl) ← callback { status, schema, targetTable, updateSchema, filas_insertadas, ... }
+3. IF updateSchema === true
+      → Edit Fields (aislar `schema` para el sub-flujo)
+      → Execute Workflow → Sync Visores (NocoDB ∥ Directus)
+   ELSE
+      → omitir sync (la UI ya conoce el esquema)
+4. (Opcional) continuar UI / notificar
 ```
 
-El motor **no** espera al sync de visores; n8n lo encadena después del webhook de éxito.
+| `updateSchema` | Acción n8n |
+|---|---|
+| `true` | Tabla nueva o columnas nuevas → lanzar Sync Visores |
+| `false` | Solo datos append → **no** gastar cold start / meta-diff |
+
+### Nodo Edit Fields (modularidad)
+
+Antes de invocar el sub-flujo se usa un nodo **Edit Fields** para desempaquetar y aislar el valor de `schema` (y lo mínimo necesario) desde el body del callback. Así el sub-workflow de sync recibe un contrato estable y no depende de todo el payload del Condenser.
+
+El motor **no** espera al sync de visores; n8n lo encadena solo cuando hace falta.
 
 ---
 

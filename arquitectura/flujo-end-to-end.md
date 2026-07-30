@@ -26,11 +26,15 @@ sequenceDiagram
     AE->>PG: read / transform / replace|append
   end
 
-  AE->>Wait: POST callback { status: "success", jobId, summary }
-  Wait->>Sync: Execute Workflow
-  par Meta Sync
-    Sync->>NC: POST meta-diff (timeout 120s, 3 retries)
-    Sync->>DX: POST schema/diff (timeout 120s, 3 retries)
+  AE->>Wait: POST callback { status, schema, targetTable, updateSchema, filas_insertadas, summary }
+  alt updateSchema == true
+    Wait->>Sync: Edit Fields → Execute Workflow
+    par Meta Sync
+      Sync->>NC: POST meta-diff (timeout 120s, 3 retries)
+      Sync->>DX: POST schema/diff (timeout 120s, 3 retries)
+    end
+  else updateSchema == false
+    Note over Wait: Sin Sync Visores (solo datos)
   end
 ```
 
@@ -47,13 +51,16 @@ Opcional: **WorkTableGenerator** → `/worktables/create`.
 4. **No** hay llamadas a Directus/NocoDB.  
 5. Callback HTTP a n8n.
 
-## Fase 3 — Sync de visores (n8n)
+## Fase 3 — Guardia de tráfico + Sync de visores (n8n)
 
-Tras el webhook de éxito, el flujo principal invoca `sync-visores-nocodb-directus.json`:
+Tras el webhook, n8n evalúa `updateSchema`:
 
-- NocoDB y Directus en **paralelo**  
-- Timeout **120.000 ms**  
-- Retry On Fail: **3 intentos**  
+| Valor | Significado | Acción |
+|---|---|---|
+| `true` | Tabla nueva o columnas añadidas por `_auto_migrate_table` | Edit Fields (`schema`) → Sync Visores |
+| `false` | Solo append | Omitir Meta Sync |
+
+Cuando corre el sync: NocoDB ∥ Directus, timeout **120.000 ms**, **3** reintentos.
 
 Ver [Sync de visores](../orquestador/sync-visores.md) y [NocoDB](../infraestructura/nocodb.md).
 

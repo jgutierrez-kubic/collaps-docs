@@ -118,11 +118,16 @@ Ejemplo: Analysis Name `Precio Frutas` → `targetTable: "c_results_precioFrutas
 
 ### Callback asíncrono (POST a `callbackUrl`)
 
+Formato exacto enviado por `AnalysisEngine._send_callback`:
+
 ```json
 {
   "status": "success",
   "analysisId": "n8n_1722096123456",
   "schema": "s00001_incancer",
+  "targetTable": "c_results_precioFrutas",
+  "updateSchema": false,
+  "filas_insertadas": 120,
   "jobId": "550e8400-e29b-41d4-a716-446655440000",
   "summary": {
     "totalRows": 120,
@@ -134,10 +139,27 @@ Ejemplo: Analysis Name `Precio Frutas` → `targetTable: "c_results_precioFrutas
 }
 ```
 
-| Campo | Notas |
+| Campo | Tipo | Notas |
+|---|---|---|
+| `status` | string | `"success"` \| `"failed"` |
+| `analysisId` | string \| null | Eco del payload |
+| `schema` | string | `schemaName` del job (clave para Sync Visores) |
+| `targetTable` | string | Tabla destino materializada |
+| `updateSchema` | **boolean** | `true` solo si hubo cambio de esquema (ver abajo) |
+| `filas_insertadas` | int | Filas escritas en todos los chunks del job |
+| `jobId` | string | UUID del encolado HTTP (si existe) |
+| `summary.*` | object | Acumulado sobre chunks (`totalRows`, `matches`, `onlyA`, `onlyB`, `hasDuplicates`) |
+
+#### Lógica de `updateSchema`
+
+Se inicializa en `False` al crear el engine y se **resetea a `False`** al inicio de cada `run()`. Solo pasa a `True` en estas dos condiciones:
+
+| Condición | Detección en código |
 |---|---|
-| `jobId` | UUID del encolado HTTP (distinto del `run_id` entero en BD) |
-| `summary.*` | Acumulado sobre todos los chunks del job |
+| **Creación de tabla nueva** | Primer chunk con `if_exists="replace"` (la tabla destino no existía) |
+| **Adición de columnas** | `_auto_migrate_table()` retorna `True` (ejecutó `ALTER TABLE ... ADD COLUMN`) |
+
+Si el job solo hace `append` sobre un esquema ya alineado → `updateSchema: false` y n8n **no** debe lanzar Meta Sync.
 
 ---
 

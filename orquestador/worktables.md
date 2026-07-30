@@ -100,6 +100,8 @@ Estado actual del motor (`WorktableEngine`):
 | Callback al `callbackUrl` | ⏳ TODO en código |
 | Agregaciones SUM/COUNT/AVG | ⏳ TODO de negocio |
 
+> **Nota técnica futura:** el patrón `updateSchema` / `filas_insertadas` / `targetTable` implementado en `analysis_engine.py` (`_send_callback`) **deberá replicarse** en `worktable_engine.py` cuando ese motor se active en producción, para que la misma guardia de tráfico de n8n (Sync Visores solo si `updateSchema === true`) aplique a las tablas `w_table_*`.
+
 ---
 
 ## Nodo n8n

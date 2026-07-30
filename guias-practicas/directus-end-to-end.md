@@ -110,7 +110,7 @@ Payload resultante (simplificado):
 2. Procesa el cruce en **bloques de 50.000 filas** (no carga toda la tabla en RAM).  
 3. Asigna un `run_id` **entero** (1, 2, 3…) a toda la corrida.  
 4. Añade filas a `targetTable` en PostgreSQL y notifica a n8n (`status: success`).  
-5. n8n lanza el **Sync de visores** (NocoDB ∥ Directus) para refrescar el catálogo UI.
+5. Si el callback trae `updateSchema: true`, n8n lanza el **Sync de visores** (NocoDB ∥ Directus); si es `false`, no hace falta refrescar el catálogo.
 
 ---
 

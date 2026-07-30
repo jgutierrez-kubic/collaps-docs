@@ -24,8 +24,8 @@ Documentación técnica de la suite COLLAPS (GitBook).
 ```text
 n8n → POST /api/v1/condenser/job
     → AnalysisEngine → PostgreSQL
-    → callback { status: "success" }
-        → Sync Visores (timeout 120s, 3 retries)
+    → callback { status, schema, targetTable, updateSchema, filas_insertadas, ... }
+        → IF updateSchema: Sync Visores (timeout 120s, 3 retries)
 ```
 
 ## Índice

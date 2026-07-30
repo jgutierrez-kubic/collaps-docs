@@ -55,13 +55,25 @@ flowchart TD
 | Callback camelCase | ✅ |
 | Registro Directus / NocoDB | ❌ eliminado |
 
-### Callback
+### Flag `updateSchema` (notificación de esquemas)
+
+| Momento | Valor |
+|---|---|
+| `__init__` / inicio de `run()` | `update_schema = False` |
+| Tabla destino **nueva** (`if_exists="replace"`) | → `True` |
+| `_auto_migrate_table()` añade columnas | → `True` |
+| Solo append sin DDL | permanece `False` |
+
+### Callback (webhook a n8n)
 
 ```json
 {
   "status": "success",
   "analysisId": "...",
   "schema": "s00001_incancer",
+  "targetTable": "c_results_precioFrutas",
+  "updateSchema": true,
+  "filas_insertadas": 120,
   "jobId": "...",
   "summary": {
     "totalRows": 120,
@@ -73,7 +85,7 @@ flowchart TD
 }
 ```
 
-Tras recibirlo, n8n debe encadenar el [Sync de visores](sync-visores.md) si las UIs deben refrescarse.
+n8n usa `updateSchema` como **guardia de tráfico**: solo si es `true` invoca el [Sync de visores](sync-visores.md). Detalle del contrato: [Payload y contratos](payload-y-contratos.md#callback-asíncrono-post-a-callbackurl).
 
 ---
 

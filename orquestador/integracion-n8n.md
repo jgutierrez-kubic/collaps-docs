@@ -136,17 +136,26 @@ Si hay URL, se envía como `callbackUrl`. El motor responde al terminar con summ
 
 ---
 
-## Sync de visores (después del callback)
+## Sync de visores y guardia de tráfico
 
-Encadena el sub-workflow `sync-visores-nocodb-directus.json`:
+El callback del motor incluye `updateSchema` (boolean), `schema`, `targetTable` y `filas_insertadas`.
 
 ```text
-Wait (callback success) → Execute Workflow → Sync Visores
-  ├─ NocoDB meta-diff   (timeout 120s, 3 retries)
-  └─ Directus schema/diff (paralelo, mismos timeouts)
+Wait (callback)
+  → IF updateSchema == true
+       → Edit Fields (desempaquetar / aislar `schema`)
+       → Execute Workflow → Sync Visores
+            ├─ NocoDB meta-diff   (timeout 120s, 3 retries)
+            └─ Directus schema/diff (paralelo)
+  → ELSE (solo append de filas)
+       → no invocar Meta Sync
 ```
 
+- **Guardia:** solo sincronizar visores cuando el motor reporta cambio de esquema (tabla nueva o columnas nuevas).  
+- **Edit Fields:** mantiene la modularidad del sub-flujo (recibe `schema` limpio, no todo el webhook).
+
 Documentación completa: [Sync de visores](sync-visores.md).  
+Contrato del webhook: [Payload y contratos](payload-y-contratos.md#callback-asíncrono-post-a-callbackurl).  
 Exposición PostgreSQL hacia NocoDB: [NocoDB](../infraestructura/nocodb.md).
 
 ---

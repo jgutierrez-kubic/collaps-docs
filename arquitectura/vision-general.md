@@ -33,8 +33,8 @@ El motor **no** habla con Directus ni NocoDB (sin auto-registro de colecciones, 
 ```text
 n8n → POST /api/v1/condenser/job
     → AnalysisEngine (chunks) → PostgreSQL
-    → callback { status: "success", ... } → n8n
-        → Execute Workflow: Sync Visores (NocoDB ∥ Directus)
+    → callback { status, schema, targetTable, updateSchema, filas_insertadas, ... }
+        → IF updateSchema: Edit Fields → Sync Visores (NocoDB ∥ Directus)
 ```
 
 ## Lectura recomendada
