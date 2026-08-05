@@ -1,6 +1,6 @@
 # FastAPI / AnalysisEngine
 
-Orquestador HTTP **bttf-engine** tras el desacoplamiento de CMS.
+Orquestador HTTP **bttf-engine** — Release Stable (motor híbrido Pandas/Polars).
 
 ## Servicio
 
@@ -8,9 +8,8 @@ Orquestador HTTP **bttf-engine** tras el desacoplamiento de CMS.
 |---|---|
 | Título | `Condenser CORE` |
 | Routers | `/api/v1/condenser` + `/api/v1/worktables` |
-| Salida HTTP del job | Solo `callbackUrl` → n8n |
-
-**Ya no** existen métodos de auto-registro Directus/NocoDB ni variables `DIRECTUS_*` en el motor.
+| Transformaciones | `app/core/polars_transformer.py` |
+| Salida HTTP del job | `callbackUrl` → n8n |
 
 ---
 
@@ -22,8 +21,6 @@ Orquestador HTTP **bttf-engine** tras el desacoplamiento de CMS.
 | Éxito | `202 Accepted` |
 | Background | `AnalysisEngine.run(job_id)` |
 
-### Respuesta `202`
-
 ```json
 {
   "status": "accepted",
@@ -33,79 +30,96 @@ Orquestador HTTP **bttf-engine** tras el desacoplamiento de CMS.
 }
 ```
 
+> El trabajo real corre **después** del `202`. En Cloud Run es **obligatorio** `--no-cpu-throttling` para que esa fase tenga CPU. Ver [Cloud Run](../despliegue/cloud-run.md).
+
 ---
 
-## Responsabilidad del motor (100% datos)
+## Motor híbrido Pandas ↔ Polars
 
 ```mermaid
 flowchart TD
-  A[POST /job → 202] --> B[chunks 50.000]
-  B --> C[df.apply transformaciones]
-  C --> D[run_id incremental]
-  D --> E[PostgreSQL replace/append]
-  E --> F[callback n8n status success]
-  F -.-> G[Sync Visores — fuera del motor]
+  A[SQL página LIMIT/OFFSET] --> B[DataFrame Pandas]
+  B --> C["pl.from_pandas()"]
+  C --> D{¿Método vectorizable?}
+  D -->|sí math/equal/…| E[Exprs Polars nativas]
+  D -->|fuzzy/regex/arrays/…| F["map_elements → collaps_engine UDF"]
+  E --> G["to_pandas()"]
+  F --> G
+  G --> H[SQLAlchemy to_sql]
 ```
 
-| Capacidad | Estado |
+| Paso | Módulo / API |
 |---|---|
-| Chunking 50k anti-OOM | ✅ |
-| `run_id` int por job | ✅ |
-| Columnas indexadas + metadatos al final | ✅ |
-| Callback camelCase | ✅ |
-| Registro Directus / NocoDB | ❌ eliminado |
+| Lectura | `pd.read_sql` + conexión corta |
+| Puente in | `pl.from_pandas` |
+| Cómputo | Polars exprs / `map_elements` |
+| Puente out | `to_pandas()` (+ **pyarrow** en deps) |
+| Orquestación | `AnalysisEngine._apply_collaps_transformations` → `transform_chunk_with_polars` |
 
-### Flag `updateSchema` (notificación de esquemas)
+Métodos con path vectorizado típico: `math_*`, `strict_equal`, `normalized_equal`, `date_equal`, `boolean_logic`.  
+UDFs (fuzzy, regex, arrays, tolerancia, …): `execute_transformation` vía `map_elements`.
 
-| Momento | Valor |
-|---|---|
-| `__init__` / inicio de `run()` | `update_schema = False` |
-| Tabla destino **nueva** (`if_exists="replace"`) | → `True` |
-| `_auto_migrate_table()` añade columnas | → `True` |
-| Solo append sin DDL | permanece `False` |
+---
 
-### Callback (webhook a n8n)
+## QueryBuilder: aliases indexados
 
-```json
-{
-  "status": "success",
-  "analysisId": "...",
-  "schema": "s00001_incancer",
-  "targetTable": "c_results_precioFrutas",
-  "updateSchema": true,
-  "filas_insertadas": 120,
-  "jobId": "...",
-  "summary": {
-    "totalRows": 120,
-    "matches": 100,
-    "onlyA": 12,
-    "onlyB": 8,
-    "hasDuplicates": false
-  }
-}
+`build_analysis_sql` emite por cada par:
+
+```sql
+a."cantidad" AS "0_cantidad_a",
+b."cantidad" AS "0_cantidad_b",
+a."cantidad" AS "1_cantidad_a",  -- misma columna, segundo par: sin colisión
+b."precio"   AS "1_precio_b"
 ```
 
-n8n usa `updateSchema` como **guardia de tráfico**: solo si es `true` invoca el [Sync de visores](sync-visores.md). Detalle del contrato: [Payload y contratos](payload-y-contratos.md#callback-asíncrono-post-a-callbackurl).
+Helper: `sql_source_column_alias(pair_index, col_name, side)` → `{index}_{col}_{side}`.
+
+Tras Polars, las columnas persistidas usan el esquema de resultado (`0_cantidadA`, `0_math_sub`, …).
+
+---
+
+## Separación lectura / cómputo / escritura
+
+| Fase | Conexión SQL |
+|---|---|
+| `LIMIT/OFFSET` página | Corta |
+| Transform Polars | **Ninguna** |
+| Persist / migrate | Corta |
+
+`SQL_CHUNK_SIZE` (recomendado `10000`).
+
+## Pool SQL fail-fast
+
+`pool_size = (DB_POOL_CPU_COUNT * 2) + DB_POOL_DISK_COUNT`, `max_overflow=0`, `pool_timeout=5`.
+
+---
+
+## `updateSchema` + callback
+
+Inicializado en `False`. Pasa a `True` solo si:
+
+1. Se crea tabla nueva (`if_exists="replace"`), o  
+2. `_auto_migrate_table()` añade columnas.
+
+Webhook: `status`, `schema`, `targetTable`, `updateSchema`, `filas_insertadas`, `jobId`, `summary` — ver [Payload](payload-y-contratos.md).
 
 ---
 
 ## WorkTables
 
-`POST /api/v1/worktables/create` — misma filosofía: Postgres + callback; sin CMS.  
-Ver [WorkTables](worktables.md).
+Mismo aislamiento CMS. Pendiente replicar patrón `updateSchema` en `worktable_engine.py` → [WorkTables](worktables.md).
 
 ## Configuración
 
-| Variable | Obligatoria | Rol |
+| Variable | Prod | Rol |
 |---|---|---|
-| `DATABASE_URL` | Sí | PostgreSQL |
-| `GCS_BUCKET_NAME` | No | `/upload` |
-| `PORT` | No | Default 8080 |
-
-No se configuran URLs ni tokens de Directus/NocoDB en este servicio.
+| `DATABASE_URL` | VPC/privada preferible | PostgreSQL |
+| `SQL_CHUNK_SIZE` | `10000` | Página |
+| `DB_POOL_CPU_COUNT` | `2` | Pool |
+| `DB_POOL_DISK_COUNT` | `1` | Pool |
 
 ## Ver también
 
-- [Payload y contratos](payload-y-contratos.md)  
-- [Sync de visores](sync-visores.md)  
-- [NocoDB](../infraestructura/nocodb.md)
+- [Integración n8n](integracion-n8n.md)  
+- [Cloud Run](../despliegue/cloud-run.md)  
+- [Variables de entorno](../despliegue/variables-entorno.md)

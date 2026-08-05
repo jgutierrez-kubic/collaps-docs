@@ -107,7 +107,7 @@ Payload resultante (simplificado):
 ## Qué pasa al disparar
 
 1. El motor responde `202` con `jobId` (no esperes el resultado en esa respuesta).  
-2. Procesa el cruce en **bloques de 50.000 filas** (no carga toda la tabla en RAM).  
+2. Procesa el cruce en **páginas** (`SQL_CHUNK_SIZE`, tip. 10.000 filas): lee, cierra la conexión, transforma en memoria y luego persiste.  
 3. Asigna un `run_id` **entero** (1, 2, 3…) a toda la corrida.  
 4. Añade filas a `targetTable` en PostgreSQL y notifica a n8n (`status: success`).  
 5. Si el callback trae `updateSchema: true`, n8n lanza el **Sync de visores** (NocoDB ∥ Directus); si es `false`, no hace falta refrescar el catálogo.

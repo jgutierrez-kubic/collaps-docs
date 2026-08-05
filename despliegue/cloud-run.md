@@ -1,6 +1,7 @@
 # Cloud Run — Motor backend (`bttf-engine`)
 
-Despliegue del servicio Python **Condenser CORE** (`collaps-C`) a Google Cloud Run mediante build desde fuente.
+Despliegue del servicio Python **Condenser CORE** (`collaps-C`) a Google Cloud Run.  
+Perfil **Release Stable**: anti-OOM, pool fail-fast y CPU sin throttling para `BackgroundTasks`.
 
 ## Servicio
 
@@ -9,15 +10,60 @@ Despliegue del servicio Python **Condenser CORE** (`collaps-C`) a Google Cloud R
 | Nombre del servicio | `bttf-engine` |
 | Proyecto GCP | `collaps-prod` |
 | Región | `us-central1` |
-| Runtime | Contenedor generado desde `Dockerfile` (Python 3.10-slim + Uvicorn) |
+| Runtime | Contenedor desde `Dockerfile` (Python 3.10-slim + Uvicorn) |
 | Entrada HTTP | `uvicorn main:app --host 0.0.0.0 --port ${PORT}` |
-| Puerto | `8080` (variable `PORT`) |
+| Puerto | `8080` (`PORT`) |
 
-La URL pública del servicio es la que consume `CollapsBttfTrigger` al llamar:
+La URL pública la consume `CollapsBttfTrigger`:
 
 ```text
 POST https://bttf-engine-....us-central1.run.app/api/v1/condenser/job
 ```
+
+---
+
+## Capacidad y escalado (Release Stable)
+
+| Recurso | Valor | Motivo |
+|---|---|---|
+| CPU | **2 vCPU** | Alineado con `DB_POOL_CPU_COUNT=2` |
+| Memoria | **4 GiB** | Margen para chunks Pandas + Polars |
+| Concurrencia por instancia | **2** | Evita colapso vertical / agotar el pool SQL |
+| Máx. instancias | **15** | Escala **horizontal** ante picos |
+| Workers Uvicorn | **1** | Un proceso; jobs en `BackgroundTasks` |
+| **CPU throttling** | **Desactivado** (`--no-cpu-throttling`) | **Obligatorio** |
+
+### Por qué `--no-cpu-throttling` es obligatorio
+
+El endpoint responde `202` de inmediato y deja el análisis en `BackgroundTasks`. Con el throttling por defecto, GCP **reduce la CPU** cuando no hay request HTTP activa → el motor asíncrono se asfixia (jobs lentísimos o “colgados”).
+
+> Todo deploy de `bttf-engine` debe incluir `--no-cpu-throttling`. Sin este flag el servicio no se considera estable en producción.
+
+Ejemplo de update de capacidad:
+
+```bash
+gcloud run services update bttf-engine \
+  --project collaps-prod \
+  --region us-central1 \
+  --cpu=2 \
+  --memory=4Gi \
+  --concurrency=2 \
+  --max-instances=15 \
+  --no-cpu-throttling
+```
+
+Variables de pool / chunk recomendadas en el mismo servicio:
+
+```bash
+gcloud run services update bttf-engine \
+  --project collaps-prod \
+  --region us-central1 \
+  --update-env-vars "SQL_CHUNK_SIZE=10000,DB_POOL_CPU_COUNT=2,DB_POOL_DISK_COUNT=1"
+```
+
+Detalle: [Variables de entorno](variables-entorno.md).
+
+---
 
 ## Comando de despliegue
 
@@ -28,43 +74,46 @@ gcloud run deploy bttf-engine `
   --source . `
   --project collaps-prod `
   --region us-central1 `
-  --allow-unauthenticated
-```
-
-Equivalente en una sola línea:
-
-```bash
-gcloud run deploy bttf-engine --source . --project collaps-prod --region us-central1 --allow-unauthenticated
+  --allow-unauthenticated `
+  --cpu=2 `
+  --memory=4Gi `
+  --concurrency=2 `
+  --max-instances=15 `
+  --no-cpu-throttling
 ```
 
 ### Qué hace `--source .`
 
-1. Empaqueta el directorio actual.
-2. Construye la imagen usando el `Dockerfile` del repo (Cloud Build managed).
-3. Publica una nueva revisión en el servicio `bttf-engine`.
+1. Empaqueta el directorio actual.  
+2. Construye la imagen con el `Dockerfile` (Cloud Build managed).  
+3. Publica una nueva revisión en `bttf-engine`.  
 4. Enruta tráfico a la revisión nueva.
 
 ### Flags relevantes
 
 | Flag | Efecto |
 |---|---|
-| `--source .` | Build + deploy desde el código local (no requiere push previo a Artifact Registry) |
-| `--project collaps-prod` | Proyecto GCP destino |
-| `--region us-central1` | Región del servicio |
-| `--allow-unauthenticated` | Permite invocación HTTP sin identidad IAM (adecuado si n8n llama por URL pública) |
+| `--source .` | Build + deploy desde código local |
+| `--project collaps-prod` | Proyecto GCP |
+| `--region us-central1` | Región |
+| `--allow-unauthenticated` | Invocación HTTP sin IAM (n8n por URL pública) |
+| `--cpu` / `--memory` | Capacidad del contenedor |
+| `--concurrency` | Peticiones simultáneas por instancia |
+| `--max-instances` | Techo de escala horizontal |
+| `--no-cpu-throttling` | **Obligatorio** — CPU plena durante BackgroundTasks |
 
-### Configurar `DATABASE_URL` en el servicio
+### Red y `DATABASE_URL` (obligatorio)
 
-El deploy anterior **no** inyecta secretos por sí solo. Tras (o junto con) el deploy, configura la variable:
+| Requisito | Detalle |
+|---|---|
+| Destino | Apuntar `DATABASE_URL` a la **IP correcta** de Cloud SQL |
+| Preferido | Conectividad **VPC / IP privada** (Serverless VPC Access / Direct VPC) |
+| Alternativa | IP pública **solo** si el firewall / authorized networks lo permiten |
+| Firewall | Asegurar que el rango/egress de Cloud Run puede alcanzar el puerto PG (5432) |
 
-```powershell
-gcloud run services update bttf-engine `
-  --project collaps-prod `
-  --region us-central1 `
-  --set-env-vars "DATABASE_URL=postgresql://DB_USER:DB_PASSWORD@DB_HOST:5432/DB_NAME"
-```
+Un `DATABASE_URL` con host incorrecto o bloqueado por firewall se manifiesta como timeouts de pool (`pool_timeout=5`) o fallos de `connect_timeout`.
 
-O vía Secret Manager (recomendado en producción):
+### Secretos / `DATABASE_URL`
 
 ```powershell
 gcloud run services update bttf-engine `
@@ -73,11 +122,9 @@ gcloud run services update bttf-engine `
   --update-secrets=DATABASE_URL=DATABASE_URL:latest
 ```
 
-Detalle de variables: [Variables de entorno](variables-entorno.md).
+---
 
 ## Imagen Docker del motor
-
-Resumen del `Dockerfile` de `collaps-C`:
 
 | Paso | Descripción |
 |---|---|
@@ -86,31 +133,34 @@ Resumen del `Dockerfile` de `collaps-C`:
 | Usuario | no-root (`app`) |
 | CMD | `uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1` |
 
-`--workers 1` es coherente con `BackgroundTasks` en el mismo proceso: más workers multiplicarían procesos sin cola compartida de jobs.
+`--workers 1` evita multiplicar pools SQL y jobs en background sin cola compartida.
+
+---
 
 ## Verificación post-deploy
 
 ```powershell
-# Health / OpenAPI
 curl https://bttf-engine-XXXX.us-central1.run.app/docs
 
-# Smoke del endpoint (esperar 202 o 422 de validación)
 curl -X POST https://bttf-engine-XXXX.us-central1.run.app/api/v1/condenser/job `
   -H "Content-Type: application/json" `
   -d "{}"
 ```
 
-Un body `{}` debe devolver **422** (campos requeridos faltantes). Eso confirma que el servicio está vivo y validando con Pydantic.
+Un body `{}` debe devolver **422** (validación Pydantic OK).
 
 ## Relación con n8n
 
 | Pieza | Despliegue |
 |---|---|
-| Motor Python | Este documento (`bttf-engine`, `--source .`) |
-| Nodos + runtime n8n | [Docker / Cloud Build](docker-cloud-build.md) (Kaniko → Artifact Registry → `n8n-collaps`) |
+| Motor Python | Este documento |
+| Nodos + runtime n8n | [Docker / Cloud Build](docker-cloud-build.md) |
 
 ## Notas operativas
 
-1. `--allow-unauthenticated` expone el API públicamente: limita superficie (solo rutas necesarias) y considera auth en evoluciones futuras.
-2. Un redeploy reinicia el proceso: jobs en `BackgroundTasks` en curso pueden perderse.
-3. Tras rotar `DATABASE_URL`, despliega/actualiza el servicio; el `@lru_cache` del engine no se invalida en caliente.
+1. **Nunca** despliegues sin `--no-cpu-throttling`.  
+2. Concurrencia baja + max instances alto = escala horizontal controlada.  
+3. Redeploy mata jobs en `BackgroundTasks` en curso.  
+4. Tras rotar `DATABASE_URL` o vars de pool, redespliega (engine en `@lru_cache`).  
+5. Si cambias vCPU, actualiza `DB_POOL_CPU_COUNT` en la misma revisión.  
+6. La imagen debe incluir `polars` y `pyarrow` (ver `requirements.txt`).

@@ -1,6 +1,6 @@
 # Componentes y límites
 
-Responsabilidades tras el desacoplamiento CMS ↔ motor (Separation of Concerns).
+Release Stable: motor híbrido, QueryBuilder indexado, DevOps sin CPU throttling.
 
 ## Mapa de componentes
 
@@ -8,15 +8,14 @@ Responsabilidades tras el desacoplamiento CMS ↔ motor (Separation of Concerns)
 flowchart LR
   subgraph n8n["n8n"]
     TRG[CollapsBttfTrigger]
-    WT[WorkTableGenerator]
     SYNC[Sync Visores]
   end
 
   subgraph core["bttf-engine"]
-    API1["/condenser/job"]
-    API2["/worktables/create"]
+    API["/condenser/job"]
+    QB[QueryBuilder]
     AE[AnalysisEngine]
-    WTE[WorktableEngine]
+    PL[polars_transformer]
     CE[collaps_engine]
   end
 
@@ -24,67 +23,67 @@ flowchart LR
   NC[NocoDB]
   DX[Directus]
 
-  TRG --> API1 --> AE --> PG
-  WT --> API2 --> WTE --> PG
-  AE -->|callback success| TRG
-  TRG --> SYNC
-  SYNC -->|meta-diff paralelo| NC
-  SYNC -->|schema/diff paralelo| DX
-  NC -->|nocodb_light| PG
+  TRG --> API --> AE
+  AE --> QB --> PG
+  AE --> PL
+  PL -->|UDF| CE
+  PL --> AE --> PG
+  AE -->|callback| TRG
+  TRG -->|si updateSchema| SYNC
+  SYNC --> NC
+  SYNC --> DX
 ```
 
 ---
 
-## 1. Motor Python (`bttf-engine`)
+## 1. Motor Python
 
 | Hace | No hace |
 |---|---|
-| Validar payload camelCase | Llamar a Directus / NocoDB |
-| JOIN + transformaciones en chunks 50k | Auto-registrar colecciones |
-| Inyectar `run_id` incremental y metadatos | Leer `portal_projects` / tokens CMS |
-| Persistir en PostgreSQL | Variables `DIRECTUS_*` |
-| POST webhook a `callbackUrl` | Orquestar Meta Sync de UIs |
+| JOIN con aliases `{i}_{col}_a` | Llamar a Directus / NocoDB |
+| Puente Pandas → Polars → Pandas | Exponer contrato distinto a n8n |
+| Vectorizado Polars + UDF `map_elements` | Mantener conexión SQL durante el cómputo |
+| Pool fail-fast + paginación | Auto-registrar colecciones |
+| Callback `updateSchema` | — |
 
-Única comunicación HTTP de salida del job: el **callback** a n8n (`status: success` \| `failed`).
+Módulos clave: `query_builder.py`, `polars_transformer.py`, `analysis_engine.py`, `db.py`.  
+Deps: `pandas`, `polars`, **`pyarrow`**, `sqlalchemy`.
 
 ---
 
-## 2. n8n (orquestador)
+## 2. QueryBuilder (anti-colisión)
 
-| Pieza | Rol |
+| Antes (roto) | Ahora |
 |---|---|
-| Nodos Collaps* | Armar payload y disparar motor / worktables |
-| Wait + `resumeUrl` | Recibir callback del motor |
-| **`sync-visores-nocodb-directus`** | Meta Sync paralelo NocoDB + Directus (timeout 120s, 3 retries) |
+| `a."col" AS "col_a"` (choca si se reusa `col`) | `a."col" AS "0_col_a"`, `a."col" AS "1_col_a"` |
 
-Detalle: [Sync de visores](../orquestador/sync-visores.md).
-
----
-
-## 3. PostgreSQL
-
-Almacén de verdad para orígenes, `c_results_*`, `w_table_*` y control de exposición a NocoDB (`nocodb_light`, `politica_exposicion`).
-
-Ver [NocoDB](../infraestructura/nocodb.md).
+Helper: `sql_source_column_alias(pair_index, col_name, side)`.  
+Las columnas **persistidas** siguen el esquema indexado de resultado (`0_colA`, `0_math_sub`, …).
 
 ---
 
-## 4. Visores (NocoDB / Directus)
+## 3. n8n
 
-| Visor | Cómo se actualiza |
+Sin cambio de contrato HTTP. Los nodos siguen enviando `columnsA` / `columnsB` / `calculationMethods`.  
+Reusar la misma columna en varios pares **ahora es seguro** gracias al QueryBuilder.
+
+---
+
+## 4. Cloud Run / red
+
+| Requisito | Por qué |
 |---|---|
-| NocoDB | HTTP `meta-diff` desde n8n; alcance vía rol `nocodb_light` |
-| Directus | HTTP `schema/diff` desde n8n |
-
-Ninguno es invocado por el proceso Python.
+| `--no-cpu-throttling` | Sin él, tras el `202` GCP baja la CPU y el job en background se ahoga |
+| `DATABASE_URL` a IP correcta (VPC/privada preferible) | Evita timeouts / denegaciones de firewall |
+| concurrency 2 · max 15 · 2 vCPU · 4 GiB | Escala horizontal + margen de memoria Polars |
 
 ---
 
-## Matriz de responsabilidades
+## Matriz
 
 | Capacidad | Python | n8n | PostgreSQL | Visores |
 |---|---|---|---|---|
-| Cálculo / chunking | ✅ | ❌ | almacena | ❌ |
-| Callback fin de job | ✅ emite | ✅ recibe | — | — |
-| Meta Sync UI | ❌ | ✅ | privilegios | reciben |
-| Exponer/ocultar tablas BIM | ❌ | ❌ | ✅ `nocodb_light` | ven el resultado |
+| Payload camelCase | valida | construye | — | — |
+| Alias SQL indexados | ✅ | no ve | ejecuta | — |
+| Cómputo Polars | ✅ | ❌ | — | — |
+| Meta Sync UI | ❌ | ✅ si `updateSchema` | privilegios | reciben |

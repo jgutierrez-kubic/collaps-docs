@@ -165,7 +165,18 @@ Si el job solo hace `append` sobre un esquema ya alineado → `updateSchema: fal
 
 ## Columnas persistidas en la tabla destino
 
-### Pares indexados (datos)
+### Aliases SQL intermedios (QueryBuilder)
+
+Tras el JOIN, cada par usa aliases **indexados** (anti-colisión si se reutiliza la misma columna origen):
+
+| Alias SQL | Ejemplo |
+|---|---|
+| `{i}_{col}_a` | `0_cantidad_a` |
+| `{i}_{col}_b` | `0_cantidad_b` |
+
+Esto es interno al motor; n8n sigue enviando solo los nombres lógicos en `columnsA` / `columnsB`.
+
+### Pares indexados (datos persistidos)
 
 Por cada par `(columnsA[i], columnsB[i], calculationMethods[i])`:
 
@@ -177,7 +188,7 @@ Por cada par `(columnsA[i], columnsB[i], calculationMethods[i])`:
 | `{i}_{method}` | `0_math_sub` o `0_diferencia` | Resultado del cálculo |
 | `{i}_is_match` | `0_is_match` | Match inferido (si aplica y no es boolean-pure) |
 
-Las columnas SQL intermedias `{col}_a` / `{col}_b` se eliminan tras materializar el bloque indexado.
+Los aliases SQL `{i}_{col}_a` se eliminan tras materializar el bloque de resultado.
 
 ### Metadatos (siempre al final, derecha)
 

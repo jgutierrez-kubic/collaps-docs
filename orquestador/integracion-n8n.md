@@ -12,6 +12,16 @@ Cómo el paquete `n8n-nodes-collaps` construye el contrato **camelCase** hacia C
 
 El Trigger lee camelCase primero y acepta fallback legacy (`readPayloadString(payload, 'tableA', 'tabla_a')`).
 
+### Compatibilidad Release Stable (Polars + aliases SQL)
+
+| Cambio en Python | ¿Rompe nodos n8n? |
+|---|---|
+| Motor híbrido Pandas ↔ Polars | **No** — mismo `AnalysisPayload` / mismos `method_id` |
+| Aliases SQL `{i}_{col}_a` | **No** — n8n no construye SQL; solo envía nombres de columna |
+| Reutilizar la misma columna en varios pares | **Mejora** — antes el JOIN podía colisionar aliases; ahora es seguro |
+
+No se requiere redeploy de nodos por estos cambios de motor (sí redeploy de `bttf-engine` con `polars` + `pyarrow`).
+
 ---
 
 ## Pipeline de nodos
